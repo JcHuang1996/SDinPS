@@ -9,10 +9,9 @@ from model.model_combined import ModelCombined
 from util.headers import *
 from util.names import *
 
-from gurobipy import GRB
-import gurobipy as gp
+import pyomo.environ as pyo
+from pyomo.repn.standard_repn import generate_standard_repn
 
-import numpy as np
 import math
 import os
 import datetime
@@ -29,8 +28,6 @@ class ModelSub(ModelCombined):
         self.main_result = main_result
 
         self.cross_constr_names = []
-
-        self.model.setParam(GRB.Param.OutputFlag, 0)
 
     def build_sub_model(self):
 
@@ -54,100 +51,124 @@ class ModelSub(ModelCombined):
 
     def add_sub_main_common_vars(self):
         """
-        The vars added in this section are the variables of main model.
-        They should be added as variables, rather than values, so that corresponding columns / coefficients
-        could be got by gurobi methods.
+        Vars in this section are the (fixed) variables from the main model.
+        They are added as Vars (not Params), fixed to the main solution,
+        so their coefficients can be tracked when generating Benders cuts.
         """
 
-        # self.var[VarName.DG_RATED_POWER] = {
-        #     j: self.model.addVar(
-        #         vtype=GRB.CONTINUOUS,
-        #         lb=self.main_result[VarName.DG_RATED_POWER][j],
-        #         ub=self.main_result[VarName.DG_RATED_POWER][j],
-        #         name=f'{VarName.DG_RATED_POWER}_({j})'
-        #     )
-        #     for j in self.data[DataName.LIST_NODE]
-        # }
-
-        # X^{G}_{j}: Binary
+        # X^{G}_{j}: Binary (fixed)
         self.var[VarName.DG_INSTALL] = {
-            j: self.model.addVar(
-                vtype=GRB.BINARY,
-                lb=self.main_result[VarName.DG_INSTALL][j],
-                ub=self.main_result[VarName.DG_INSTALL][j],
+            j: self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.DG_INSTALL}_({j})'
             )
             for j in self.data[DataName.LIST_NODE]
         }
+        for j in self.data[DataName.LIST_NODE]:
+            val = self.main_result[VarName.DG_INSTALL][j]
+            self.var[VarName.DG_INSTALL][j].setlb(val)
+            self.var[VarName.DG_INSTALL][j].setub(val)
+            self.var[VarName.DG_INSTALL][j].set_value(val)
 
-        # x^L_{ij}: Binary
+        # x^L_{ij}: Binary (fixed)
         self.var[VarName.LINE_HARDEN] = {
-            (i, j): self.model.addVar(
-                vtype=GRB.BINARY,
-                lb=self.main_result[VarName.LINE_HARDEN][i, j],
-                ub=self.main_result[VarName.LINE_HARDEN][i, j],
+            (i, j): self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.LINE_HARDEN}_({i},{j})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
         }
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            val = self.main_result[VarName.LINE_HARDEN][i, j]
+            self.var[VarName.LINE_HARDEN][i, j].setlb(val)
+            self.var[VarName.LINE_HARDEN][i, j].setub(val)
+            self.var[VarName.LINE_HARDEN][i, j].set_value(val)
 
     def set_sub_objective(self):
 
-        self.obj_term[ObjName.DG_VARIANT_COST] = gp.quicksum(
+        self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
             self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
             for j in self.data[DataName.LIST_NODE]
         )
 
-        self.obj_term[ObjName.DG_GENERATING_COST] = gp.quicksum(
+        self.obj_term[ObjName.DG_GENERATING_COST] = pyo.quicksum(
             self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
             for j in self.data[DataName.LIST_NODE]
             for t in self.data[DataName.LIST_TIME]
             for s in self.data[DataName.LIST_SCENARIO]
         )
 
-        self.obj_term[ObjName.LOAD_SHED_COST] = gp.quicksum(
+        self.obj_term[ObjName.LOAD_SHED_COST] = pyo.quicksum(
             self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
             for j in self.data[DataName.LIST_NODE]
             for t in self.data[DataName.LIST_TIME]
             for s in self.data[DataName.LIST_SCENARIO]
         )
 
-        self.model.setObjective(
+        self.set_objective(
             self.obj_term[ObjName.DG_VARIANT_COST]
             + self.obj_term[ObjName.DG_GENERATING_COST]
             + self.obj_term[ObjName.LOAD_SHED_COST],
-            GRB.MINIMIZE
+            sense=pyo.minimize
         )
+
+    def solve_relaxed(self):
+        logger.info(f'Optimizing relaxed model of {self.model_name}')
+
+        self.model_relax = self.model.clone()
+        pyo.TransformationFactory('core.relax_integer_vars').apply_to(self.model_relax)
+
+        self.model_relax.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
+
+        self._last_results_relax = self.solver.solve(self.model_relax, tee=True, load_solutions=True)
 
     def benders_opt_cut_info_generator(self):
         """
-        After solved the RELAXED sub model, derive the coefficients and constants for generating corresponding benders cut.
-        :return:
-        constant_term: constant term of the benders opt cut (dot product of the dua solution and the RHS);
-        var_coeff_dict: coefficients for generating benders opt cut, in the form of:
-            {var_class_name: {var_key: \pi^{T} * the corresponding column of the variable in sub model}}
+        After solving the RELAXED sub model, derive the coefficients and constants for generating
+        the corresponding Benders optimality cut.
         """
 
-        # compute the constant term
-        duals_all = self.model_relax.getAttr(GRB.Attr.Pi)
-        rhs_value_all = self.model_relax.getAttr(GRB.Attr.RHS)
-        constant_term = np.dot(duals_all, rhs_value_all)
+        constant_term = 0.0
 
-        # compute the var_coeff_dict
         var_coeff_dict = {
-            var_class_name: {var_key: None for var_key in sorted(self.main_result[var_class_name].keys())}
+            var_class_name: {var_key: 0.0 for var_key in sorted(self.main_result[var_class_name].keys())}
             for var_class_name in sorted(self.main_result.keys())
+            if var_class_name in self.var
         }
 
-        for var_class_name in var_coeff_dict.keys():
-            for var_key in var_coeff_dict[var_class_name].keys():
-                var_exact_name = self.var[var_class_name][var_key].VarName
-                col_info = self.model_relax.getCol(self.model_relax.getVarByName(var_exact_name))
-                var_coef_in_cut = 0
-                for i in range(col_info.size()):
-                    pi_of_constr = col_info.getConstr(i).getAttr(GRB.Attr.Pi)
-                    var_coed_in_constr = col_info.getCoeff(i)
-                    var_coef_in_cut += pi_of_constr * var_coed_in_constr
-                var_coeff_dict[var_class_name][var_key] = var_coef_in_cut
+        relax_id_to_key = {}
+        for var_class_name in sorted(var_coeff_dict.keys()):
+            for var_key in sorted(var_coeff_dict[var_class_name].keys()):
+                v = self.var[var_class_name][var_key]
+                comp_name = self._var_comp_name_by_id[id(v)]
+                v_relax = getattr(self.model_relax, comp_name)
+                relax_id_to_key[id(v_relax)] = (var_class_name, var_key)
+
+        for c in self.model_relax._constr_list.values():
+
+            pi = self.model_relax.dual.get(c, 0.0)
+
+            if c.upper is not None and c.lower is None:
+                residual = c.body - c.upper
+            elif c.lower is not None and c.upper is None:
+                residual = c.body - c.lower
+            else:
+                rhs = c.upper if c.upper is not None else c.lower
+                residual = c.body - rhs
+
+            repn = generate_standard_repn(residual, compute_values=False)
+
+            c0 = repn.constant if repn.constant is not None else 0.0
+            constant_term += float(pi) * (-pyo.value(c0))
+
+            if repn.linear_vars is None:
+                continue
+
+            for v_i, a_i in zip(repn.linear_vars, repn.linear_coefs):
+                key = relax_id_to_key.get(id(v_i), None)
+                if key is None:
+                    continue
+                var_class_name, var_key = key
+                var_coeff_dict[var_class_name][var_key] += float(pi) * float(a_i)
 
         return constant_term, var_coeff_dict

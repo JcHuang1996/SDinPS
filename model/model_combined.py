@@ -7,9 +7,8 @@
 from model.model_base import ModelBase
 from util.headers import *
 from util.names import *
-from gurobipy import GRB
 
-import gurobipy as gp
+import pyomo.environ as pyo
 import math
 import logging
 
@@ -49,8 +48,8 @@ class ModelCombined(ModelBase):
     def add_vars_basic_generator_bi(self):
 
         self.var[VarName.DG_INSTALL] = {
-            j: self.model.addVar(
-                vtype=GRB.BINARY,
+            j: self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.DG_INSTALL}_({j})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -59,8 +58,8 @@ class ModelCombined(ModelBase):
     def add_vars_basic_generator_c(self):
 
         self.var[VarName.DG_RATED_POWER] = {
-            j: self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=0,
+            j: self.add_var(
+                domain=pyo.Reals, lb=0,
                 name=f'{VarName.DG_RATED_POWER}_({j})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -69,8 +68,8 @@ class ModelCombined(ModelBase):
     def add_vars_basic_line(self):
         # x^L_{ij}: Binary
         self.var[VarName.LINE_HARDEN] = {
-            (i, j): self.model.addVar(
-                vtype=GRB.BINARY,
+            (i, j): self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.LINE_HARDEN}_({i},{j})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
@@ -79,8 +78,8 @@ class ModelCombined(ModelBase):
     def add_vars_sys_topology(self):
         # u^L_{ijts}: Continuous, free
         self.var[VarName.VIRTUAL_LINE_FLOW] = {
-            (i, j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY,
+            (i, j, t, s): self.add_var(
+                domain=pyo.Reals,
                 name=f'{VarName.VIRTUAL_LINE_FLOW}_({i},{j},{t},{s})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
@@ -90,8 +89,8 @@ class ModelCombined(ModelBase):
 
         # u^S_{jts}: Binary
         self.var[VarName.VIRTUAL_SOURCE_INDICATOR] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.BINARY,
+            (j, t, s): self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.VIRTUAL_SOURCE_INDICATOR}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -101,8 +100,8 @@ class ModelCombined(ModelBase):
 
         # u^I_{jts}: Continuous, non-negative
         self.var[VarName.VIRTUAL_INJECT_POWER] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=0,
+            (j, t, s): self.add_var(
+                domain=pyo.Reals, lb=0,
                 name=f'{VarName.VIRTUAL_INJECT_POWER}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -113,8 +112,8 @@ class ModelCombined(ModelBase):
     def add_vars_line_connectivity(self):
         # y^C_{ijts}: Binary
         self.var[VarName.LINE_CONNECTED] = {
-            (i, j, t, s): self.model.addVar(
-                vtype=GRB.BINARY,
+            (i, j, t, s): self.add_var(
+                domain=pyo.Binary,
                 name=f'{VarName.LINE_CONNECTED}_({i},{j},{t},{s})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
@@ -125,8 +124,8 @@ class ModelCombined(ModelBase):
     def add_vars_sys_operating(self):
         # v_{jts}: Continuous, non-negative
         self.var[VarName.BUS_VOLTAGE] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=0,
+            (j, t, s): self.add_var(
+                domain=pyo.Reals, lb=0,
                 name=f'{VarName.BUS_VOLTAGE}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -136,8 +135,8 @@ class ModelCombined(ModelBase):
 
         # p^G_{jts}: Continuous, free
         self.var[VarName.DG_ACTIVE_POWER] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY,
+            (j, t, s): self.add_var(
+                domain=pyo.Reals,
                 name=f'{VarName.DG_ACTIVE_POWER}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -147,8 +146,8 @@ class ModelCombined(ModelBase):
 
         # q^G_{jts}: Continuous, free
         self.var[VarName.DG_REACTIVE_POWER] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY,
+            (j, t, s): self.add_var(
+                domain=pyo.Reals,
                 name=f'{VarName.DG_REACTIVE_POWER}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -158,8 +157,8 @@ class ModelCombined(ModelBase):
 
         # p_{ijts}: Continuous, free
         self.var[VarName.LINE_ACTIVE_FLOW] = {
-            (i, j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY,
+            (i, j, t, s): self.add_var(
+                domain=pyo.Reals,
                 name=f'{VarName.LINE_ACTIVE_FLOW}_({i},{j},{t},{s})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
@@ -169,8 +168,8 @@ class ModelCombined(ModelBase):
 
         # q_{ijts}: Continuous, free
         self.var[VarName.LINE_REACTIVE_FLOW] = {
-            (i, j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY,
+            (i, j, t, s): self.add_var(
+                domain=pyo.Reals,
                 name=f'{VarName.LINE_REACTIVE_FLOW}_({i},{j},{t},{s})'
             )
             for (i, j) in self.data[DataName.LIST_LINE]
@@ -180,8 +179,8 @@ class ModelCombined(ModelBase):
 
         # y^L_{jts}: Continuous, non-negative (load shed ratio)
         self.var[VarName.LOAD_SHED_RATIO] = {
-            (j, t, s): self.model.addVar(
-                vtype=GRB.CONTINUOUS, lb=0, ub=1,
+            (j, t, s): self.add_var(
+                domain=pyo.Reals, lb=0, ub=1,
                 name=f'{VarName.LOAD_SHED_RATIO}_({j},{t},{s})'
             )
             for j in self.data[DataName.LIST_NODE]
@@ -190,8 +189,8 @@ class ModelCombined(ModelBase):
         }
 
     def add_constr_DG_ub(self):
-        self.model.addConstr(
-            gp.quicksum(
+        self.add_constr(
+            pyo.quicksum(
                 self.var[VarName.DG_INSTALL][j] for j in self.data[DataName.LIST_NODE]
             ) <= self.data[DataName.NUM_DG_UB],
             name=ConstrName.DG_UPPERBOUND
@@ -199,8 +198,9 @@ class ModelCombined(ModelBase):
 
     def add_constr_DG_rated_power_ub(self):
         for j in self.data[DataName.LIST_NODE]:
-            self.model.addConstr(
-                self.var[VarName.DG_RATED_POWER][j] <= self.data[DataName.NUM_RATED_POWER_UB] * self.var[VarName.DG_INSTALL][j],
+            self.add_constr(
+                self.var[VarName.DG_RATED_POWER][j]
+                <= self.data[DataName.NUM_RATED_POWER_UB] * self.var[VarName.DG_INSTALL][j],
                 name=f'{ConstrName.DG_OPERATION}_{j}'
             )
 
@@ -208,7 +208,7 @@ class ModelCombined(ModelBase):
         for (i, j) in self.data[DataName.LIST_LINE]:
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.LINE_CONNECTED][i, j, t, s]
                         <= self.data[DataName.DICT_LINE_HEALTHY_NH][i, j, t, s] * (1 - self.var[VarName.LINE_HARDEN][i, j])
                         + self.data[DataName.DICT_LINE_HEALTHY_H][i, j, t, s] * self.var[VarName.LINE_HARDEN][i, j],
@@ -225,18 +225,18 @@ class ModelCombined(ModelBase):
                 for s in self.data[DataName.LIST_SCENARIO]:
 
                     # c1: sum_k u^L_{jkts} - sum_i u^L_{ijts} = u^I_{jts} - 1
-                    self.model.addConstr(
-                        gp.quicksum(
+                    self.add_constr(
+                        pyo.quicksum(
                             self.var[VarName.VIRTUAL_LINE_FLOW][j, k, t, s] for k in self.data[DataName.DICT_NODE_CHILDREN][j]
                         )
-                        - gp.quicksum(
+                        - pyo.quicksum(
                             self.var[VarName.VIRTUAL_LINE_FLOW][i, j, t, s] for i in self.data[DataName.DICT_NODE_PARENTS][j]
                         ) == self.var[VarName.VIRTUAL_INJECT_POWER][j, t, s] - 1,
                         name=f'{ConstrName.VIRTUAL_FLOW_BAL_C1}_{j}_{t}_{s}'
                     )
 
                     # c2: u^I_{jts} <= V_INJ_M u^{S}_{jts}
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.VIRTUAL_INJECT_POWER][j, t, s]
                         <= V_INJ_M * self.var[VarName.VIRTUAL_SOURCE_INDICATOR][j, t, s],
                         name=f'{ConstrName.VIRTUAL_FLOW_BAL_C2}_{j}_{t}_{s}'
@@ -247,12 +247,12 @@ class ModelCombined(ModelBase):
         for (i, j) in self.data[DataName.LIST_LINE]:
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
-                    self.model.addConstr(
+                    self.add_constr(
                         -V_INJ_M * self.var[VarName.LINE_CONNECTED][i, j, t, s]
                         <= self.var[VarName.VIRTUAL_LINE_FLOW][i, j, t, s],
                         name=f'{ConstrName.NO_VIRTUAL_ON_OPEN}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.VIRTUAL_LINE_FLOW][i, j, t, s]
                         <= V_INJ_M * self.var[VarName.LINE_CONNECTED][i, j, t, s],
                         name=f'{ConstrName.NO_VIRTUAL_ON_OPEN}_R_{i}_{j}_{t}_{s}'
@@ -261,10 +261,11 @@ class ModelCombined(ModelBase):
         # sum_{(i,j)} y^C_{ijts} = |J| - sum_j u^S_{jts}
         for t in self.data[DataName.LIST_TIME]:
             for s in self.data[DataName.LIST_SCENARIO]:
-                self.model.addConstr(
-                    gp.quicksum(self.var[VarName.LINE_CONNECTED][i, j, t, s]
-                                        for (i, j) in self.data[DataName.LIST_LINE])
-                    == len(self.data[DataName.LIST_NODE]) - gp.quicksum(
+                self.add_constr(
+                    pyo.quicksum(
+                        self.var[VarName.LINE_CONNECTED][i, j, t, s]
+                        for (i, j) in self.data[DataName.LIST_LINE]
+                    ) == len(self.data[DataName.LIST_NODE]) - pyo.quicksum(
                         self.var[VarName.VIRTUAL_SOURCE_INDICATOR][j, t, s] for j in self.data[DataName.LIST_NODE]
                     ),
                     name=f'{ConstrName.RADIALITY}_{t}_{s}'
@@ -275,7 +276,7 @@ class ModelCombined(ModelBase):
         for j in self.data[DataName.LIST_NODE]:
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.DG_ACTIVE_POWER][j, t, s] <= self.var[VarName.DG_RATED_POWER][j],
                         name=f'{ConstrName.DG_ACTIVE_POWER_UB}_{j}_{t}_{s}'
                     )
@@ -283,7 +284,7 @@ class ModelCombined(ModelBase):
         for j in self.data[DataName.LIST_NODE]:
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.DG_REACTIVE_POWER][j, t, s]
                         <= self.data[DataName.DICT_DG_ALPHA_UB][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s],
                         name=f'{ConstrName.DG_REACTIVE_POWER_UB}_{j}_{t}_{s}'
@@ -296,12 +297,12 @@ class ModelCombined(ModelBase):
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
                     # Left (lower) bound
-                    self.model.addConstr(
+                    self.add_constr(
                         self.data[DataName.NUM_VOLTAGE_LB] <= self.var[VarName.BUS_VOLTAGE][j, t, s],
                         name=f'{ConstrName.VOLTAGE_RANGE_C1}_{j}_{t}_{s}'
                     )
                     # Right (upper) bound
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.BUS_VOLTAGE][j, t, s] <= self.data[DataName.NUM_VOLTAGE_UB],
                         name=f'{ConstrName.VOLTAGE_RANGE_C2}_{j}_{t}_{s}'
                     )
@@ -310,7 +311,7 @@ class ModelCombined(ModelBase):
         slk_node_idx = self.data[DataName.SLACK_NODE_IDX]
         for t in self.data[DataName.LIST_TIME]:
             for s in self.data[DataName.LIST_SCENARIO]:
-                self.model.addConstr(
+                self.add_constr(
                     self.var[VarName.BUS_VOLTAGE][slk_node_idx, t, s] == self.data[DataName.NUM_VOLTAGE_SLACK],
                     name=f'{ConstrName.VOLTAGE_SLACK_BUS}_{t}_{s}'
                 )
@@ -323,19 +324,19 @@ class ModelCombined(ModelBase):
                 for s in self.data[DataName.LIST_SCENARIO]:
 
                     v_drop_on_ij = (
-                            self.data[DataName.DICT_LINE_RESISTANCE][i, j] * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s]
-                            + self.data[DataName.DICT_LINE_REACTANCE][i, j] * self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s]
+                        self.data[DataName.DICT_LINE_RESISTANCE][i, j] * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s]
+                        + self.data[DataName.DICT_LINE_REACTANCE][i, j] * self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s]
                     )
 
                     # Left (lower) side
-                    self.model.addConstr(
-                        - V_FLOW_M * (1 - self.var[VarName.LINE_CONNECTED][i, j, t, s])
+                    self.add_constr(
+                        -V_FLOW_M * (1 - self.var[VarName.LINE_CONNECTED][i, j, t, s])
                         <= self.var[VarName.BUS_VOLTAGE][i, t, s] - self.var[VarName.BUS_VOLTAGE][j, t, s]
                         - v_drop_on_ij / self.data[DataName.NUM_VOLTAGE_SLACK],
                         name=f'{ConstrName.VOLTAGE_FLOW_REL}_L_{i}_{j}_{t}_{s}'
                     )
                     # Right (upper) side
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.BUS_VOLTAGE][i, t, s] - self.var[VarName.BUS_VOLTAGE][j, t, s]
                         - v_drop_on_ij / self.data[DataName.NUM_VOLTAGE_SLACK]
                         <= V_FLOW_M * (1 - self.var[VarName.LINE_CONNECTED][i, j, t, s]),
@@ -347,12 +348,12 @@ class ModelCombined(ModelBase):
             for t in self.data[DataName.LIST_TIME]:
                 for s in self.data[DataName.LIST_SCENARIO]:
 
-                    self.model.addConstr(
-                        gp.quicksum(
+                    self.add_constr(
+                        pyo.quicksum(
                             self.var[VarName.LINE_ACTIVE_FLOW][j, k, t, s]
                             for k in self.data[DataName.DICT_NODE_CHILDREN][j]
                         )
-                        - gp.quicksum(
+                        - pyo.quicksum(
                             self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s]
                             for i in self.data[DataName.DICT_NODE_PARENTS][j]
                         )
@@ -362,12 +363,12 @@ class ModelCombined(ModelBase):
                         name=f'{ConstrName.FLOW_BALANCE_C1}_{j}_{t}_{s}'
                     )
 
-                    self.model.addConstr(
-                        gp.quicksum(
+                    self.add_constr(
+                        pyo.quicksum(
                             self.var[VarName.LINE_REACTIVE_FLOW][j, k, t, s]
                             for k in self.data[DataName.DICT_NODE_CHILDREN][j]
                         )
-                        - gp.quicksum(
+                        - pyo.quicksum(
                             self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s]
                             for i in self.data[DataName.DICT_NODE_PARENTS][j]
                         )
@@ -384,20 +385,20 @@ class ModelCombined(ModelBase):
                 for s in self.data[DataName.LIST_SCENARIO]:
                     yC = self.var[VarName.LINE_CONNECTED][i, j, t, s]
                     # Active flow
-                    self.model.addConstr(
+                    self.add_constr(
                         -V_FLOW_M * yC <= self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s],
                         name=f'{ConstrName.NO_FLOW_ON_OPEN_C1}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] <= V_FLOW_M * yC,
                         name=f'{ConstrName.NO_FLOW_ON_OPEN_C1}_R_{i}_{j}_{t}_{s}'
                     )
                     # Reactive flow
-                    self.model.addConstr(
+                    self.add_constr(
                         -V_FLOW_M * yC <= self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s],
                         name=f'{ConstrName.NO_FLOW_ON_OPEN_C2}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s] <= V_FLOW_M * yC,
                         name=f'{ConstrName.NO_FLOW_ON_OPEN_C2}_R_{i}_{j}_{t}_{s}'
                     )
@@ -411,34 +412,34 @@ class ModelCombined(ModelBase):
                 for s in self.data[DataName.LIST_SCENARIO]:
 
                     # c1: -2 S̄_ij <= sqrt(3)*p + q <= 2 S̄_ij
-                    self.model.addConstr(
+                    self.add_constr(
                         -2 * self.data[DataName.DICT_LINE_THERMAL_UB][i, j]
                         <= sqrt3 * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] + self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s],
                         name=f'{ConstrName.LINE_THERMAL_C1}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         sqrt3 * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] + self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s]
                         <= 2 * self.data[DataName.DICT_LINE_THERMAL_UB][i, j],
                         name=f'{ConstrName.LINE_THERMAL_C1}_R_{i}_{j}_{t}_{s}'
                     )
 
                     # c2: -S̄_ij <= p <= S̄_ij
-                    self.model.addConstr(
+                    self.add_constr(
                         - self.data[DataName.DICT_LINE_THERMAL_UB][i, j] <= self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s],
                         name=f'{ConstrName.LINE_THERMAL_C2}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] <= self.data[DataName.DICT_LINE_THERMAL_UB][i, j],
                         name=f'{ConstrName.LINE_THERMAL_C2}_R_{i}_{j}_{t}_{s}'
                     )
 
                     # c3: -2 S̄_ij <= sqrt(3)*p - q <= 2 S̄_ij
-                    self.model.addConstr(
+                    self.add_constr(
                         -2 * self.data[DataName.DICT_LINE_THERMAL_UB][i, j]
                         <= sqrt3 * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] - self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s],
                         name=f'{ConstrName.LINE_THERMAL_C3}_L_{i}_{j}_{t}_{s}'
                     )
-                    self.model.addConstr(
+                    self.add_constr(
                         sqrt3 * self.var[VarName.LINE_ACTIVE_FLOW][i, j, t, s] - self.var[VarName.LINE_REACTIVE_FLOW][i, j, t, s]
                         <= 2 * self.data[DataName.DICT_LINE_THERMAL_UB][i, j],
                         name=f'{ConstrName.LINE_THERMAL_C3}_R_{i}_{j}_{t}_{s}'
@@ -446,17 +447,17 @@ class ModelCombined(ModelBase):
 
     def derive_obj_terms(self):
 
-        self.obj_term[ObjName.DG_FIXED_COST] = gp.quicksum(
+        self.obj_term[ObjName.DG_FIXED_COST] = pyo.quicksum(
             self.data[DataName.DICT_DG_COST_FIX][j] * self.var[VarName.DG_INSTALL][j]
             for j in self.data[DataName.LIST_NODE]
         )
 
-        self.obj_term[ObjName.DG_VARIANT_COST] = gp.quicksum(
+        self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
             self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
             for j in self.data[DataName.LIST_NODE]
         )
 
-        self.obj_term[ObjName.DG_GENERATING_COST] = gp.quicksum(
+        self.obj_term[ObjName.DG_GENERATING_COST] = pyo.quicksum(
             self.data[DataName.DICT_SC_PROB][s]
             * self.data[DataName.DICT_DG_COST_UNIT][j]
             * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
@@ -465,12 +466,12 @@ class ModelCombined(ModelBase):
             for s in self.data[DataName.LIST_SCENARIO]
         )
 
-        self.obj_term[ObjName.LINE_HARDEN_COST] = gp.quicksum(
+        self.obj_term[ObjName.LINE_HARDEN_COST] = pyo.quicksum(
             self.data[DataName.DICT_LINE_COST_HARDEN][i, j] * self.var[VarName.LINE_HARDEN][i, j]
             for (i, j) in self.data[DataName.LIST_LINE]
         )
 
-        self.obj_term[ObjName.LOAD_SHED_COST] = gp.quicksum(
+        self.obj_term[ObjName.LOAD_SHED_COST] = pyo.quicksum(
             self.data[DataName.DICT_SC_PROB][s]
             * self.data[DataName.NUM_COST_SHED]
             * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
@@ -481,18 +482,18 @@ class ModelCombined(ModelBase):
 
     def add_all_objective_terms(self):
 
-        self.model.setObjective(
-            gp.quicksum(
+        self.set_objective(
+            pyo.quicksum(
                 self.obj_term[obj_term_name] for obj_term_name in sorted(self.obj_term.keys())
             ),
-            GRB.MINIMIZE
+            sense=pyo.minimize
         )
 
     def add_objective_by_terms(self, term_list=None):
 
-        self.model.setObjective(
-            gp.quicksum(
+        self.set_objective(
+            pyo.quicksum(
                 self.obj_term[obj_term_name] for obj_term_name in term_list
             ),
-            GRB.MINIMIZE
+            sense=pyo.minimize
         )
