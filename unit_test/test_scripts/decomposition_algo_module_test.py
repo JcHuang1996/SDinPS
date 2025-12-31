@@ -13,7 +13,7 @@ from util.project_logger import init_logger
 from dao.data_reader import DataReader
 from dao.data_processor import DataProcessor
 from model import ModelMain, ModelSub, ModelCombined
-from algo.SDDiP import SDDiP_planning
+from algo.TwoStageDecomposition import TwoStageDecomposition
 from algo.algo_simple_tools import *
 from util.virsualization import plot_iter_obj_curves
 
@@ -65,7 +65,7 @@ r = DataReader(
 r.read()
 print("CSV read success:")
 
-SDDiP_module = SDDiP_planning(raw_data=r.raw_data, scenario_list=scenario_list, time_list=time_list)
+SDDiP_module = TwoStageDecomposition(raw_data=r.raw_data, scenario_list=scenario_list, time_list=time_list)
 
 # =========================================
 # estimate the obj value lb for every scenario
@@ -168,7 +168,7 @@ SDDiP_module.build_main_stage_model()
 # cut generation are only based on the solved main model
 # =========================================
 
-for ite_num in range(100):
+for ite_num in range(10):
 
     ite_name = str(ite_num)
 
@@ -177,7 +177,7 @@ for ite_num in range(100):
     # else:
     #     record_this_ite = False
 
-    if ite_num % 20 == 0:
+    if ite_num % 2 == 0:
         add_integer_l_shaped = 1
     else:
         add_integer_l_shaped = 0

@@ -25,7 +25,7 @@ import os
 logger = logging.getLogger(__name__)
 
 
-class SDDiP_planning():
+class TwoStageDecomposition:
 
     def __init__(self, raw_data, time_list, scenario_list):
 
@@ -73,10 +73,12 @@ class SDDiP_planning():
         self.model_main = ModelMain(model_name='Main', model_data=self.main_model_data)
         self.model_main.build_main_model()
 
-    def solve_and_record_main_stage_model(self, ite_name=None):
+    def solve_main_stage_model(self, ite_name=None):
+        # solve the main model, and compute the obj terms
         self.model_main.solve()
         self.model_main.cal_detailed_obj()
 
+    def record_main_stage_model(self, ite_name=None):
         # show and record the main model objective value (the best bound objective value)
         best_bound_objective_value = self._get_model_obj_value(self.model_main.model)
         best_main_stage_objective_value = (
@@ -129,11 +131,12 @@ class SDDiP_planning():
         sce_sub_model.build_sub_model()
         return sce_sub_model
 
-    def solve_and_record_sub_model(self, sub_model_sce_list=None, sub_model=None, main_stage_obj_value=None, ite_name=None):
-        # solve the sub problem model
+    @staticmethod
+    def solve_sub_model(sub_model=None):
         sub_model.solve()
         sub_model.cal_detailed_obj()
 
+    def record_sub_model(self, sub_model_sce_list=None, sub_model=None, main_stage_obj_value=None, ite_name=None):
         # collect the scenario's objective value.
         # Note: the 1st stage objective value is included.
         sce_obj_value_w_main = self._get_model_obj_value(sub_model.model) + main_stage_obj_value
@@ -318,7 +321,8 @@ class SDDiP_planning():
         if given_main_result is not None:
             self.model_main.fix_variable_value(var_fix_info=given_main_result)
 
-        best_main_stage_obj_value = self.solve_and_record_main_stage_model(ite_name=ite_name)
+        self.solve_main_stage_model(ite_name=ite_name)
+        best_main_stage_obj_value = self.record_main_stage_model(ite_name=ite_name)
 
         # record the result of the main model required by the sub problems
         curr_main_result = self.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
@@ -359,13 +363,16 @@ class SDDiP_planning():
             )
 
             if record_incumbent:
+
                 # solve the sub model and update the objective record, including the detailed record in the algo module
-                sub_obj_value_w_main = self.solve_and_record_sub_model(
+                self.solve_sub_model(sub_model=curr_sub_model)
+                sub_obj_value_w_main = self.record_sub_model(
                     sub_model_sce_list=sub_sce_list,
                     sub_model=curr_sub_model,
                     main_stage_obj_value=best_main_stage_obj_value,
                     ite_name=ite_name
                 )
+
                 best_incumbent_obj_value += sub_obj_value_w_main * sum(
                     self.sce_prob_dict[s_idx]
                     for s_idx in sub_sce_list
