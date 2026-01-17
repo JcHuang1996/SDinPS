@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 def run_combined_formulation_test():
     """Run the combined formulation test."""
     test_read_method = InputMethodName.LOCAL_CSV
-    test_file_path = '/Users/huangjiacheng/OR591/unit test/test_local_csv_file'
-    data_set_name = 'function test'
+    test_file_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file'
+    data_set_name = 'function_test'
 
     r = DataReader(
         read_method=test_read_method,
@@ -47,9 +47,9 @@ def run_combined_formulation_test():
             's_1',
             's_2',
             's_3',
-            's_4',
-            's_5',
-            's_6',
+            # 's_4',
+            # 's_5',
+            # 's_6',
             # 's_7',
             # 's_8',
             # 's_9',

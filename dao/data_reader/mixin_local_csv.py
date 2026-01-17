@@ -83,14 +83,6 @@ class LocalCSVMixin:
             logger.error("Error: Cannot find node.csv")
             raise
         
-        # read the power curve (power demand variation in 24h) from data folder
-        try:
-            df_power_curve = pd.read_csv(read_path + 'power_curve.csv')
-            self.raw_data[InputDataName.POWER_CURVE_DF] = df_power_curve
-        except FileNotFoundError:
-            logger.error("Error: Cannot find power_curve.csv")
-            raise
-        
         # read power of each node in each scenario
         try:
             df_scenario_node_load = pd.read_csv(read_path + 's_load_P3715kW_system.csv')
