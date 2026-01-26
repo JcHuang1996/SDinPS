@@ -69,3 +69,9 @@ class ScenarioNodePowerHeader:
     NODE = 'node'
     P_LOAD_MW = 'P_LOAD_MW'
     Q_LOAD_MW = 'Q_LOAD_MW'
+
+
+class NodeCoordinateHeader:
+    NODE_ID = 'node_id'
+    X = 'x'
+    Y = 'y'

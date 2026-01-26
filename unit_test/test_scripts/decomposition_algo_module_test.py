@@ -20,7 +20,7 @@ from dao.data_processor import DataProcessor
 from model import ModelMain, ModelSub, ModelCombined
 from algo.TwoStageDecomposition import TwoStageDecomposition
 from algo.algo_simple_tools import *
-from util.virsualization import plot_iter_obj_curves
+from util.converge_visual import plot_iter_obj_curves
 
 from datetime import datetime
 import logging
