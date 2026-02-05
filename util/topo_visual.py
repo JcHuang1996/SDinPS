@@ -425,7 +425,7 @@ def sto_status_preview(folder_path: str, line_state_file: str):
     Args:
         folder_path: Absolute path to the folder containing node.csv, branch.csv, 
                      and node_coordinate.csv files.
-        line_state_file: Absolute path to s_line_stage_w_o_harden.csv file.
+        line_state_file: Absolute path to s_line_state_w_o_harden.csv file.
     """
     # Load network data
     node_df, branch_df, coord_df, valid_nodes, G, pos = _load_network_data(folder_path)
@@ -517,5 +517,5 @@ if __name__ == '__main__':
     net_topo_preview(test_folder)
     
     # Option 2: Stochastic status preview (static plots)
-    # line_state_file = os.path.join(test_folder, 's_line_stage_w_o_harden.csv')
+    # line_state_file = os.path.join(test_folder, 's_line_state_w_o_harden.csv')
     # sto_status_preview(test_folder, line_state_file)

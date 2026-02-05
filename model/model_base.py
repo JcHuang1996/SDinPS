@@ -34,7 +34,7 @@ class ModelBase:
 
         # var registry: locate the corresponding var in cloned/relaxed models
         self._var_counter = 0
-        self._var_comp_name_by_id = {}  # id(var_obj) -> component name on self.model
+        self._var_comp_name_by_id = {}  # id(var_ob) -> component name on self.model
 
         # objective name
         self._objective_name = '_obj'
@@ -74,16 +74,16 @@ class ModelBase:
         lb, ub = self._normalize_bounds(lb, ub)
         var_comp = pyo.Var(domain=domain, bounds=(lb, ub))
         self.model.add_component(comp_name, var_comp)
-        var_obj = getattr(self.model, comp_name)
+        var_ob = getattr(self.model, comp_name)
 
-        self._var_comp_name_by_id[id(var_obj)] = comp_name
+        self._var_comp_name_by_id[id(var_ob)] = comp_name
 
         if name is not None:
             if not hasattr(self.model, '_user_var_name'):
                 self.model._user_var_name = {}
             self.model._user_var_name[comp_name] = name
 
-        return var_obj
+        return var_ob
 
     def add_constr(self, expr, name: Optional[str] = None):
 
@@ -92,6 +92,17 @@ class ModelBase:
         if name is not None:
             self._constr_name_map[name] = idx
         return self.model._constr_list[idx]
+
+    def get_constr_idx_by_name(self, name):
+        return self._constr_name_map.get(name)
+
+    def get_constr_item_by_name(self, name):
+        constr_idx = self.get_constr_idx_by_name(name)
+        return self.model._constr_list[constr_idx]
+
+    def get_constr_item_in_relax_by_name(self, name):
+        constr_idx = self.get_constr_idx_by_name(name)
+        return self.model_relax._constr_list[constr_idx]
 
     def set_objective(self, expr, sense=pyo.minimize):
 
@@ -143,6 +154,15 @@ class ModelBase:
 
         self.solve_status = f'{ModelStatus.UNKNOWN}_{tc}'
 
+    def set_parameters(self, param_dict):
+        """
+        :param param_dict: the parameters' name and value to set. Default: Gurobi's parameters
+        :return: none
+        set the parameters of the model.
+        """
+        for key, value in param_dict.items():
+            self.solver.options[key] = value
+
     def solve(self):
         logger.info(f'Optimizing model {self.model_name}')
 
@@ -161,6 +181,9 @@ class ModelBase:
         else:
             logger.info(f'Unknown model status: {self.solve_status}')
 
+    def get_obj_value(self):
+        return pyo.value(self.model.find_component('_obj'))
+
     def solve_relaxed(self):
         logger.info(f'Optimizing relaxed model of {self.model_name}')
 
@@ -170,6 +193,9 @@ class ModelBase:
         self._last_results_relax = self.solver.solve(self.model_relax, tee=True, load_solutions=True)
         self._fill_uninitialized_vars(self.model_relax)
 
+    def get_relaxed_obj_value(self):
+        return pyo.value(self.model_relax.find_component('_obj'))
+
     def get_result(self, var_name_list):
 
         logger.info(f'Get result for following variables: {var_name_list}')
@@ -177,9 +203,9 @@ class ModelBase:
         for var_name in var_name_list:
             self.result[var_name] = {}
             for key in sorted(self.var[var_name].keys()):
-                var_obj = self.var[var_name][key]
-                var_value = pyo.value(var_obj)
-                if var_obj.is_binary():
+                var_ob = self.var[var_name][key]
+                var_value = pyo.value(var_ob)
+                if var_ob.is_binary():
                     var_value = int(round(var_value))
                 self.result[var_name][key] = var_value
 
@@ -192,8 +218,8 @@ class ModelBase:
         for var_name in var_name_list:
             self.result_relax[var_name] = {}
             for key in sorted(self.var[var_name].keys()):
-                var_obj = self.var[var_name][key]
-                comp_name = self._var_comp_name_by_id[id(var_obj)]
+                var_ob = self.var[var_name][key]
+                comp_name = self._var_comp_name_by_id[id(var_ob)]
                 relax_var = getattr(self.model_relax, comp_name)
                 self.result_relax[var_name][key] = pyo.value(relax_var)
 
@@ -212,19 +238,19 @@ class ModelBase:
             self.var_record_before_fixed[var_class_name] = {}
             for var_key in sorted(var_fix_info[var_class_name].keys()):
 
-                var_obj = self.var[var_class_name][var_key]
-                self.var_record_before_fixed[var_class_name][var_key] = (var_obj.lb, var_obj.ub)
+                var_ob = self.var[var_class_name][var_key]
+                self.var_record_before_fixed[var_class_name][var_key] = (var_ob.lb, var_ob.ub)
 
-                var_obj.fix(var_fix_info[var_class_name][var_key])
+                var_ob.fix(var_fix_info[var_class_name][var_key])
 
     def recover_variable_from_fixed(self):
 
         for var_class_name in sorted(self.var_record_before_fixed.keys()):
             for var_key in sorted(self.var_record_before_fixed[var_class_name].keys()):
                 origin_lb, origin_ub = self.var_record_before_fixed[var_class_name][var_key]
-                var_obj = self.var[var_class_name][var_key]
-                var_obj.unfix()
-                var_obj.setlb(origin_lb)
-                var_obj.setub(origin_ub)
+                var_ob = self.var[var_class_name][var_key]
+                var_ob.unfix()
+                var_ob.setlb(origin_lb)
+                var_ob.setub(origin_ub)
 
         self.var_record_before_fixed = {}

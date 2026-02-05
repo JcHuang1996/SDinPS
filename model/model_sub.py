@@ -22,12 +22,22 @@ logger = logging.getLogger(__name__)
 
 class ModelSub(ModelCombined):
 
-    def __init__(self, model_name='default_m', model_data=None, main_result=None):
+    def __init__(self, model_name='default_m', model_data=None, main_result=None, sub_model_sce_list=None):
         super().__init__(model_name=model_name, model_data=model_data)
 
         self.main_result = main_result
 
-        self.cross_constr_names = []
+        # the dict for collecting necessary information of the local variable copy constraints.
+        # key: constraint name
+        # value: (var class, var idx), for finding corresponding var by self.var[var class][var name]
+        self.local_copy_constr_info = {}
+
+        # the dict for recording constraints' dual value
+        # key: constraint name
+        # value: dual value
+        self.constr_dual_value = {}
+
+        self.sub_model_sce_list = sub_model_sce_list
 
     def build_sub_model(self):
 
@@ -172,3 +182,61 @@ class ModelSub(ModelCombined):
                 var_coeff_dict[var_class_name][var_key] += float(pi) * float(a_i)
 
         return constant_term, var_coeff_dict
+
+    def build_sub_model_redo(self):
+
+        # add vars, the same as add_vars in model_combined
+        self.add_vars_basic_generator_bi()
+        self.add_vars_basic_generator_c()
+        self.add_vars_basic_line()
+        self.add_vars_line_connectivity()
+        self.add_vars_sys_operating()
+        self.add_vars_sys_topology()
+
+        # add constraints, the same as add_constraints in model_combine, except that DG_ub is removed
+        self.add_constr_DG_rated_power_ub()
+        self.add_constr_DG_operating()
+        self.add_constr_line_connectivity()
+        self.add_constr_system_operating()
+        self.add_constr_system_topology_constraints()
+
+        # modularized design: add constraints to fix the main stage variables.
+        self.add_constr_state_var_local_copy()
+
+        # set submodel objective
+        self.set_sub_objective()
+
+    def add_constr_state_var_local_copy(self):
+        for j in self.data[DataName.LIST_NODE]:
+            constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.DG_INSTALL}_{j}'
+            self.add_constr(
+                self.var[VarName.DG_INSTALL][j] == self.main_result[VarName.DG_INSTALL][j],
+                name=constr_name
+            )
+            self.local_copy_constr_info[constr_name] = (VarName.DG_INSTALL, j)
+
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.LINE_HARDEN}_{i}_{j}'
+            self.add_constr(
+                self.var[VarName.LINE_HARDEN][i, j] == self.main_result[VarName.LINE_HARDEN][i, j],
+                name=constr_name
+            )
+            self.local_copy_constr_info[constr_name] = (VarName.LINE_HARDEN, (i, j))
+
+    def collect_dual_opt_sol(self, constr_to_collect_list):
+        """
+        collect the dual optimal solution value corresponding to given constraints
+        :param constr_to_collect_list: list of constraint names. constraint names should be defined when adding constraints
+        :return:
+        constr_dual_value: dict. key: constraint name; value: dual optimal solution value
+        constr_var_map: dict. key: constraint name; value: (var class, var key)
+        """
+        constr_var_map = {}
+        for constr_name in constr_to_collect_list:
+            constr_item = self.get_constr_item_in_relax_by_name(constr_name)
+            pi = self.model_relax.dual[constr_item]
+            self.constr_dual_value[constr_name] = pi
+            constr_var_map[constr_name] = self.local_copy_constr_info[constr_name]
+
+        return self.constr_dual_value.copy(), constr_var_map
+

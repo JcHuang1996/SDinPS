@@ -36,7 +36,7 @@ def run_decomp_module_test(
     time_list=None,
     test_read_method=None,
     test_file_path=None,
-    data_set_name='function test',
+    data_set_name='function_test',
     max_iterations=10
 ):
     """Run the decomposition module test.

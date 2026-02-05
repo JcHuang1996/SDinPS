@@ -147,6 +147,8 @@ class ConstrName:
     LINE_THERMAL_C2 = 'thermal_c2'                      # AFN: Linearized thermal limitation (part 2)
     LINE_THERMAL_C3 = 'thermal_c3'                      # AFN: Linearized thermal limitation (part 3)
 
+    # Benders specific constraints
+    VAR_LOCAL_COPY = 'v_l_c'
 
 class ObjName:
     DG_FIXED_COST = 'dg_fixed_cost'

@@ -126,3 +126,14 @@ class ModelMain(ModelCombined):
             - (sub_model_obj_value - sub_model_obj_lb) * self.var[estimated_node_key[0]][estimated_node_key[1]],
             name=f'U_C_Bi_{track_idx}_{sub_problem_sce_list}'
         )
+
+    def add_custom_cut(self, cut_name, cut_lhs, cut_rhs):
+        """
+        Add a custom cut to the main model. The cut must be in the format of Expr1 \geq Expr2,
+        where Expr1, Expr2 are two mathematical expressions.
+        :param cut_name:
+        :param cut_lhs:
+        :param cut_rhs:
+        :return:
+        """
+        self.add_constr(cut_lhs >= cut_rhs, name=cut_name)
