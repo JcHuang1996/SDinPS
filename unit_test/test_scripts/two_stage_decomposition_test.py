@@ -8,6 +8,8 @@ import os
 import sys
 
 from algo.two_stage_decomp_redo import TwoStageDecompRedo
+from model import ModelInnerMinimizationProblem
+from algo.algo_simple_tools import compare_rhs
 
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -36,8 +38,9 @@ def run_decomp_module_test(
     time_list=None,
     test_read_method=None,
     test_file_path=None,
-    data_set_name=None,
-    max_iterations=200
+    data_set_name='function_test',
+    max_iterations=4,
+    output_label=None,
 ):
     """Run the decomposition module test.
 
@@ -80,6 +83,8 @@ def run_decomp_module_test(
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     output_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'output', timestamp)
+    if output_label is not None:
+        output_dir = output_dir + '_' + output_label
     if enable_result_output:
         os.makedirs(output_dir, exist_ok=True)
 
@@ -101,6 +106,11 @@ def run_decomp_module_test(
     # build main model
     two_stage_decomp_module.build_main_stage_model()
 
+    # decide how to group and iterate the scenarios
+    sce_group_list = [
+        [s] for s in scenario_list
+    ]
+
     for ite_num in range(max_iterations):
 
         ite_name = str(ite_num)
@@ -118,15 +128,15 @@ def run_decomp_module_test(
         # starting from 0
         best_incumbent_obj_value = 0
 
-        # decide how to group and iterate the scenarios
-        sce_group_list = [
-            [s] for s in scenario_list
-        ]
+        # the following part aims on collecting relaxed solution from main problem for better cut
+        two_stage_decomp_module.solve_main_stage_relaxed_model()
+        frac_main_result = two_stage_decomp_module.model_main.get_result_relaxed([VarName.DG_INSTALL, VarName.LINE_HARDEN])
 
         # iterating by the above division
         for sub_sce_list in sce_group_list:
 
-            two_stage_decomp_module.build_sub_model(
+            # solve sub model based on binary main solution for classical benders cut and recording real sub problem obj
+            two_stage_decomp_module.build_sub_model_redo(
                 sub_model_sce_list=sub_sce_list,
                 given_main_result=curr_main_result,
             )
@@ -147,31 +157,108 @@ def run_decomp_module_test(
                 for s_idx in sub_sce_list
             )
 
-            local_copy_constr_dual, local_copy_constr_var_map = two_stage_decomp_module.current_sub_model.collect_dual_opt_sol(
+            constr_dual_via_bi_main, constr_var_map_via_bi_main = two_stage_decomp_module.current_sub_model.collect_dual_opt_sol(
                 constr_to_collect_list=local_copy_var_constr_name
             )
             sub_model_LP_relax_value = two_stage_decomp_module.current_sub_model.get_relaxed_obj_value()
 
             # lhs, rhs = two_stage_decomp_module.gen_sce_bds_opt_cut(
             #     lp_opt_value=sub_model_LP_relax_value,
-            #     constr_dual_info=local_copy_constr_dual,
-            #     constr_var_map=local_copy_constr_var_map
+            #     constr_dual_info=constr_dual_via_bi_main,
+            #     constr_var_map=constr_var_map_via_bi_main
             # )
 
-            # todo: check if Lagrangian Cut in 2 stage is equivalent to the cut using sub model MIP opt solution to replace LP relaxed solution
-            lhs, rhs = two_stage_decomp_module.gen_sce_bds_opt_cut(
+            bd_lhs, bd_rhs = two_stage_decomp_module.gen_sce_bds_opt_cut(
                 lp_opt_value=sub_obj_value,
-                constr_dual_info=local_copy_constr_dual,
-                constr_var_map=local_copy_constr_var_map
+                constr_dual_info=constr_dual_via_bi_main,
+                constr_var_map=constr_var_map_via_bi_main,
+                forward_sol=curr_main_result
             )
 
-            cut_name = f's_{str(sub_sce_list)}_{ite_name}'
+            cut_name = f'bd_s_{str(sub_sce_list)}_{ite_name}'
 
-            two_stage_decomp_module.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lhs, cut_rhs=rhs)
+            two_stage_decomp_module.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=bd_lhs, cut_rhs=bd_rhs)
+
+            # solve sub model based on fractional main solution for strengthen benders cut and lagrangian cut
+            two_stage_decomp_module.build_sub_frac_model(
+                sub_model_sce_list=sub_sce_list,
+                given_main_frac_result=frac_main_result
+            )
+            two_stage_decomp_module.solve_sub_frac_model()
+            constr_dual_via_frac_main, constr_var_map_via_frac_main = two_stage_decomp_module.curr_sub_frac_model.collect_dual_opt_sol(
+                constr_to_collect_list=local_copy_var_constr_name
+            )
+
+            sbd_lhs, sbd_rhs, obtained_sub_obj, obtained_main_sol = two_stage_decomp_module.gen_sce_strengthen_bds_cut(
+                sub_model_sce_list=sub_sce_list,
+                given_main_result=frac_main_result,
+                given_dual_info=constr_dual_via_frac_main,
+                constr_var_map=constr_var_map_via_frac_main,
+            )
+            cut_name = f'str_bd_s_{str(sub_sce_list)}_{ite_name}'
+            is_same, max_abs_diff, location = compare_rhs(bd_rhs, sbd_rhs, tol=0.1, show_in_log=True, show_in_console=False)
+            if not is_same:
+                two_stage_decomp_module.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=sbd_lhs, cut_rhs=sbd_rhs)
+
+            if ite_num >= max_iterations-25:
+                lg_lhs, lg_rhs, sub_obj, main_sol = two_stage_decomp_module.gen_sub_sce_lag_cut_heuristic(
+                    sub_model_sce_list=sub_sce_list,
+                    given_main_result=frac_main_result,
+                    given_dual_info=constr_dual_via_frac_main,
+                    constr_var_map=constr_var_map_via_frac_main,
+                    max_ite_num=10
+                )
+                cut_name = f'str_lag_s_{str(sub_sce_list)}_{ite_name}'
+                is_same, max_abs_diff, location = compare_rhs(bd_rhs, lg_rhs, tol=0.1, show_in_log=True, show_in_console=False)
+                if not is_same:
+                    two_stage_decomp_module.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lg_lhs, cut_rhs=lg_rhs)
 
         two_stage_decomp_module.ite_obj_value_dict[ite_name]['sub_obj(best_incumbent)'] = {
             'sub_p_total': best_incumbent_obj_value
         }
+
+    # # # generate lagrangian cuts of each scenario
+    # for sub_sce_list in sce_group_list:
+    #     curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+    #     two_stage_decomp_module.gen_sub_sce_lagrangian_cut(
+    #         sub_model_sce_list=sub_sce_list,
+    #         ini_main_result=curr_main_result,
+    #         max_ite_num=10
+    #     )
+    #
+    # # solve main model
+    # two_stage_decomp_module.solve_main_stage_model()
+    #
+    # # record the main model result
+    # ite_name = 'lag'
+    # main_stage_obj, total_obj = two_stage_decomp_module.record_main_stage_model(ite_name='lag')
+    #
+    # # record the result of the main model required by the sub problems
+    # curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+    #
+    # # iterating by the above division
+    # for sub_sce_list in sce_group_list:
+    #     two_stage_decomp_module.build_sub_model_redo(
+    #         sub_model_sce_list=sub_sce_list,
+    #         given_main_result=curr_main_result,
+    #     )
+    #
+    #     two_stage_decomp_module.solve_relaxed_sub_model()
+    #     two_stage_decomp_module.solve_sub_model()
+    #
+    #     sub_obj_w_main, sub_obj_value = two_stage_decomp_module.record_sub_model(
+    #         main_stage_obj_value=main_stage_obj,
+    #         ite_name=ite_name,
+    #     )
+    #
+    #     best_incumbent_obj_value = 0
+    #
+    #     best_incumbent_obj_value += sub_obj_w_main * sum(
+    #         two_stage_decomp_module.sce_prob_dict[s_idx]
+    #         for s_idx in sub_sce_list
+    #     )
+
+    two_stage_decomp_module.model_main.write_file(file_name=output_dir+'/main_model.lp')
 
     iter_general_csv(
         ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
@@ -187,12 +274,21 @@ def run_decomp_module_test(
     plot_iter_obj_curves(
         ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
         output_dir=output_dir,
-        # real_objective_value=3441951
-        real_objective_value=1707000
-        # real_objective_value=2910637
+        real_objective_value=2999173
     )
 
 
 
 if __name__ == "__main__":
-    run_decomp_module_test()
+    run_decomp_module_test(
+        enable_log_output=False,
+        enable_result_output=True,
+        # scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
+        scenario_list=['s_1', 's_3', 's_5'],
+        time_list=None,
+        test_read_method=None,
+        test_file_path=None,
+        data_set_name='function_test_symm_broken',
+        max_iterations=250,
+        output_label='longr_ns_correct_sbd_lgc_135s_right'
+    )

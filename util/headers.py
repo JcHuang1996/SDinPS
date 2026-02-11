@@ -15,6 +15,7 @@ class NodeHeader:
     NODE_ID = 'node_id'
     P_LOAD = 'Pload_MW'
     Q_LOAD = 'Qload_MW'
+    FIXED_C = 'fixed_cost'
 
 
 class BranchHeader:

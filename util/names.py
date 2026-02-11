@@ -88,7 +88,7 @@ class DataName:
 
 class VarName:
     # === Main Variables ===
-    SUB_OBJ_EST = 'eta'               # Continuous, η_s value of the subproblem objective in scenario s. AFN: \eta_{s}
+    SUB_OBJ_EST = 'theta'               # Continuous, η_s value of the subproblem objective in scenario s. AFN: \theta_{s} (was \eta previously, overlapped with lagrangian cut variable)
     DG_INSTALL = 'xg'                   # Binary, xg_j indicating whether DG is installed at node j. AFN: x^{G}_{j}
     LINE_HARDEN = 'xl'                  # Binary, xl_ij indicating whether line (i,j) is hardened. AFN: x^{L}_{ij}
     DG_RATED_POWER = 'pgrt'             # Continuous, pgrt_j the rated power capacity of DG at node j. AFN: p^{Grt}_{j}
@@ -107,6 +107,13 @@ class VarName:
     VIRTUAL_SOURCE_INDICATOR = 'us'     # Binary, us_jts indicating whether node j is virtual source at time t in scenario s. AFN: u^{S}_{jts}
     VIRTUAL_INJECT_POWER = 'ui'         # Continuous, ui_jts virtual power injected from virtual source at node j at time t in scenario s. AFN: u^{I}_{jts}
 
+    # === Lagrangian multiplier obtaining model
+    LIFT_VALUE = 'etaLift'              # Continuous, \eta, the lift value of the lagrangian cut to generate, AFN: \eta
+    LAG_MULTIPLIER = 'lambda'           # Continuous, \lambda, the variable corresponding to the obtained lagrangian multiplier, use constr_names of corresponding constraints in main model as keys, AFN: \lambda
+
+    # === Lagrangian cut generation model
+    LAG_ESTIMATOR = 'etaEst'            # Continues, \eta, the lagrangian cut generating estimator, AFN: \eta
+    AR_VAR_OBJ = 'ctx'                  # Continues, variable for recording the term cx in referred formulation
 
 class ConstrName:
     # === Main Problem Model Constraints ===
@@ -158,3 +165,6 @@ class ObjName:
     LOAD_SHED_COST = 'load_shed_cost'
 
     SUB_OBJ_TERM = 'sub_obj_term'
+
+    SUB_OBJ_FUNCTION = 'sub_obj_function'
+    COMPLEMENTARY_SLACK = 'complementary_slack'

@@ -232,6 +232,9 @@ class ModelBase:
         for key, expr in self.obj_term.items():
             self.obj_term_value[key] = pyo.value(expr)
 
+    def write_file(self, file_name):
+        self.model.write(file_name, io_options={'symbolic_solver_labels': True})
+
     def fix_variable_value(self, var_fix_info):
 
         for var_class_name in sorted(var_fix_info.keys()):

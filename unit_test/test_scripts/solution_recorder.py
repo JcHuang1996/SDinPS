@@ -107,10 +107,12 @@ def record_solution(
 
 if __name__ == "__main__":
     # Example usage
-    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/IEEE123bus'
-    scenario_list = ['s_6']
-    # scenario_list = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6']
+    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test_symm_broken'
+    # # scenario_list = ['s_6']
+    # # scenario_list = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6']
     # scenario_list = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6', 's_7', 's_8', 's_9', 's_10']
-    for s in scenario_list:
-        s_list = [s]
-        record_solution(dataset_path=dataset_path, scenario_list=s_list)
+    # for s in scenario_list:
+    #     s_list = [s]
+    #     record_solution(dataset_path=dataset_path, scenario_list=s_list)
+
+    record_solution(dataset_path=dataset_path, scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'])

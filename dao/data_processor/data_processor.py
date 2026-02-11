@@ -91,9 +91,12 @@ class DataProcessor:
         # ========================================
         dict_parameter = self.raw_data[InputDataName.PARAMETERS_DICT].copy()
 
-        self.data[DataName.DICT_DG_COST_FIX] = {
-            j: dict_parameter[ParameterKey.DG_CF] for j in self.data[DataName.LIST_NODE]
-        }
+        if NodeHeader.FIXED_C not in df_node.columns:
+            self.data[DataName.DICT_DG_COST_FIX] = {
+                j: dict_parameter[ParameterKey.DG_CF] for j in self.data[DataName.LIST_NODE]
+            }
+        else:
+            self.data[DataName.DICT_DG_COST_FIX] = df_node.set_index([NodeHeader.NODE_ID])[NodeHeader.FIXED_C].to_dict()
 
         self.data[DataName.DICT_DG_COST_VAR] = {
             j: dict_parameter[ParameterKey.DG_CV] for j in self.data[DataName.LIST_NODE]
