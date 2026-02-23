@@ -8,6 +8,9 @@ import pandas as pd
 import os
 import random
 import shutil
+from typing import Any, Dict, List, Optional, Tuple
+
+from util.names import VarName
 
 
 def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
@@ -46,6 +49,95 @@ def iter_sub_prob_info(ite_obj_value_dict=None, output_dir=None, scenario_list=N
     df_sub = pd.DataFrame(sub_records)
     csv_sub_path = os.path.join(output_dir, 'iter_subproblem_info.csv')
     df_sub.to_csv(csv_sub_path, index=False)
+
+
+def write_power_usage_capacity_ratio(
+    best_sub_results: Optional[Dict[str, Any]],
+    output_dir: str,
+    detailed_csv_name: str = "power_usage_capacity_ratio_detailed.csv",
+    averaged_csv_name: str = "power_usage_capacity_ratio_averaged.csv",
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Compute and write power usage capacity ratio from best-iteration sub results.
+
+    best_sub_results: dict with VarName.DG_ACTIVE_POWER -> {(j,t,s): value},
+        VarName.DG_RATED_POWER -> {(j,s): value}. If None or empty, no files are written.
+    output_dir: directory to write CSV files.
+    detailed_csv_name / averaged_csv_name: output file names.
+
+    Power usage capacity ratio = active_power / rated_power (per node, scenario, time).
+    Averaged ratio = mean over timeslots for each (node, scenario).
+
+    Returns (path_to_detailed, path_to_averaged), or (None, None) if no data.
+    """
+    if not best_sub_results:
+        return None, None
+    pg = best_sub_results.get(VarName.DG_ACTIVE_POWER, {})
+    pgrt = best_sub_results.get(VarName.DG_RATED_POWER, {})
+    if not pg or not pgrt:
+        return None, None
+
+    # Detailed: node, scenario, time, active_power, rated_power, ratio
+    detailed_rows = []
+    for (j, t, s), active_power in pg.items():
+        rated_power = pgrt.get((j, s), None)
+        if rated_power is None:
+            continue
+        ratio = (active_power / rated_power) if rated_power != 0 else float("nan")
+        detailed_rows.append({
+            "node": j,
+            "scenario": s,
+            "time": t,
+            "active_power": active_power,
+            "rated_power": rated_power,
+            "ratio": ratio,
+        })
+    if not detailed_rows:
+        return None, None
+    df_detailed = pd.DataFrame(detailed_rows)
+    os.makedirs(output_dir, exist_ok=True)
+    path_detailed = os.path.join(output_dir, detailed_csv_name)
+    df_detailed.to_csv(path_detailed, index=False)
+
+    # Averaged: node, scenario, rated_power, averaged_ratio
+    df = df_detailed.copy()
+    df["ratio"] = pd.to_numeric(df["ratio"], errors="coerce")
+    agg = df.groupby(["node", "scenario"], as_index=False).agg(
+        rated_power=("rated_power", "first"),
+        averaged_ratio=("ratio", "mean"),
+    )
+    path_averaged = os.path.join(output_dir, averaged_csv_name)
+    agg.to_csv(path_averaged, index=False)
+
+    return path_detailed, path_averaged
+
+
+def write_decomp_run_parameters(
+    output_dir: str,
+    scenario_list: List[Any],
+    data_set_name: str,
+    max_iterations: int,
+    benders_cut_iter_range: Optional[Tuple[int, int]],
+    strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
+    lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+    file_name: str = "decomp_run_parameters.txt",
+) -> str:
+    """
+    Write a text file in output_dir recording the given run parameters, one per line.
+    Returns the path of the written file.
+    """
+    path = os.path.join(output_dir, file_name)
+    lines = [
+        f"scenario_list: {scenario_list}",
+        f"data_set_name: {data_set_name}",
+        f"max_iterations: {max_iterations}",
+        f"benders_cut_iter_range: {benders_cut_iter_range}",
+        f"strengthen_benders_cut_iter_range: {strengthen_benders_cut_iter_range}",
+        f"lagrangian_cut_iter_range: {lagrangian_cut_iter_range}",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return path
 
 
 def load_warm_start(path):

@@ -4,7 +4,7 @@
 # @Email    : jiachenghuang0601@gmail.com
 
 
-from typing import Any
+from typing import Any, Callable, Optional, Tuple
 from util.names import DataName, ObjName, VarName
 
 from dao.data_processor import DataProcessor
@@ -435,3 +435,83 @@ class TwoStageDecompRedo:
         )
 
         return lhs, rhs, sub_obj_value, main_sol, lag_multiplier
+
+    def add_benders_cut(
+        self,
+        sub_sce_list,
+        ite_name,
+        sub_obj_value,
+        constr_dual_info,
+        constr_var_map,
+        forward_sol,
+        cut_name_prefix: str = "bd",
+    ) -> Tuple[str, Any, Any]:
+        """
+        Generate Benders optimality cut (via gen_sce_bds_opt_cut) and add it to the main model.
+        Returns (cut_name, lhs, rhs) so callers can compare with other cuts in future logic.
+        """
+        bd_lhs, bd_rhs = self.gen_sce_bds_opt_cut(
+            lp_opt_value=sub_obj_value,
+            constr_dual_info=constr_dual_info,
+            constr_var_map=constr_var_map,
+            forward_sol=forward_sol,
+        )
+        cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
+        self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=bd_lhs, cut_rhs=bd_rhs)
+        return cut_name, bd_lhs, bd_rhs
+
+    def add_strengthen_benders_cut(
+        self,
+        sub_sce_list,
+        ite_name,
+        given_main_result,
+        given_dual_info,
+        constr_var_map,
+        cut_name_prefix: str = "str_bd",
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+    ) -> Tuple[str, Any, Any, float, Any]:
+        """
+        Generate strengthened Benders cut (via gen_sce_strengthen_bds_cut) and optionally add it.
+        If should_add_cut is provided, the cut is added only when should_add_cut(lhs, rhs, cut_name) is True.
+        Otherwise the cut is always added. Returns (cut_name, lhs, rhs, obtained_sub_obj, obtained_main_sol)
+        for possible comparison with other cuts in future functions.
+        """
+        sbd_lhs, sbd_rhs, obtained_sub_obj, obtained_main_sol = self.gen_sce_strengthen_bds_cut(
+            sub_model_sce_list=sub_sce_list,
+            given_main_result=given_main_result,
+            given_dual_info=given_dual_info,
+            constr_var_map=constr_var_map,
+        )
+        cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
+        if should_add_cut is None or should_add_cut(sbd_lhs, sbd_rhs, cut_name):
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=sbd_lhs, cut_rhs=sbd_rhs)
+        return cut_name, sbd_lhs, sbd_rhs, obtained_sub_obj, obtained_main_sol
+
+    def add_lagrangian_cut(
+        self,
+        sub_sce_list,
+        ite_name,
+        given_main_result,
+        given_dual_info,
+        constr_var_map,
+        max_ite_num: int = 10,
+        cut_name_prefix: str = "str_lag",
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+    ) -> Tuple[str, Any, Any, float, Any]:
+        """
+        Generate Lagrangian cut (via gen_sub_sce_lag_cut_heuristic) and optionally add it.
+        If should_add_cut is provided, the cut is added only when should_add_cut(lhs, rhs, cut_name) is True.
+        Otherwise the cut is always added. Returns (cut_name, lhs, rhs, sub_obj, main_sol)
+        for possible comparison with other cuts in future functions.
+        """
+        lg_lhs, lg_rhs, sub_obj, main_sol = self.gen_sub_sce_lag_cut_heuristic(
+            sub_model_sce_list=sub_sce_list,
+            given_main_result=given_main_result,
+            given_dual_info=given_dual_info,
+            constr_var_map=constr_var_map,
+            max_ite_num=max_ite_num,
+        )
+        cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
+        if should_add_cut is None or should_add_cut(lg_lhs, lg_rhs, cut_name):
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lg_lhs, cut_rhs=lg_rhs)
+        return cut_name, lg_lhs, lg_rhs, sub_obj, main_sol
