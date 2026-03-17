@@ -96,10 +96,10 @@ class ModelSub(ModelCombined):
 
     def set_sub_objective(self):
 
-        self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
-            for j in self.data[DataName.LIST_NODE]
-        )
+        # self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
+        #     self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
+        #     for j in self.data[DataName.LIST_NODE]
+        # )
 
         self.obj_term[ObjName.DG_GENERATING_COST] = pyo.quicksum(
             self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
@@ -116,7 +116,7 @@ class ModelSub(ModelCombined):
         )
 
         self.set_objective(
-            self.obj_term[ObjName.DG_VARIANT_COST]
+            # self.obj_term[ObjName.DG_VARIANT_COST]
             + self.obj_term[ObjName.DG_GENERATING_COST]
             + self.obj_term[ObjName.LOAD_SHED_COST],
             sense=pyo.minimize
@@ -207,21 +207,32 @@ class ModelSub(ModelCombined):
         self.set_sub_objective()
 
     def add_constr_state_var_local_copy(self):
-        for j in self.data[DataName.LIST_NODE]:
-            constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.DG_INSTALL}_{j}'
-            self.add_constr(
-                self.var[VarName.DG_INSTALL][j] == self.main_result[VarName.DG_INSTALL][j],
-                name=constr_name
-            )
-            self.local_copy_constr_info[constr_name] = (VarName.DG_INSTALL, j)
+        var_name_list = sorted(self.main_result.keys())
+        for var_name in var_name_list:
+            var_key_list = sorted(self.main_result[var_name].keys())
+            for var_key in var_key_list:
+                constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{var_name}_{var_key}'
+                self.add_constr(
+                    self.var[var_name][var_key] == self.main_result[var_name][var_key],
+                    name=constr_name,
+                )
+                self.local_copy_constr_info[constr_name] = (var_name, var_key)
 
-        for (i, j) in self.data[DataName.LIST_LINE]:
-            constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.LINE_HARDEN}_{i}_{j}'
-            self.add_constr(
-                self.var[VarName.LINE_HARDEN][i, j] == self.main_result[VarName.LINE_HARDEN][i, j],
-                name=constr_name
-            )
-            self.local_copy_constr_info[constr_name] = (VarName.LINE_HARDEN, (i, j))
+        # for j in self.data[DataName.LIST_NODE]:
+        #     constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.DG_INSTALL}_{j}'
+        #     self.add_constr(
+        #         self.var[VarName.DG_INSTALL][j] == self.main_result[VarName.DG_INSTALL][j],
+        #         name=constr_name
+        #     )
+        #     self.local_copy_constr_info[constr_name] = (VarName.DG_INSTALL, j)
+        #
+        # for (i, j) in self.data[DataName.LIST_LINE]:
+        #     constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.LINE_HARDEN}_{i}_{j}'
+        #     self.add_constr(
+        #         self.var[VarName.LINE_HARDEN][i, j] == self.main_result[VarName.LINE_HARDEN][i, j],
+        #         name=constr_name
+        #     )
+        #     self.local_copy_constr_info[constr_name] = (VarName.LINE_HARDEN, (i, j))
 
     def collect_dual_opt_sol(self, constr_to_collect_list):
         """

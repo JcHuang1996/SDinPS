@@ -4,11 +4,12 @@
 # @Email    : jiachenghuang0601@gmail.com
 
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 from util.names import DataName, ObjName, VarName
 
 from dao.data_processor import DataProcessor
 from model import ModelMain, ModelSub, ModelCombined, ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, ModelLagrangianCutDeterministic
+from util.tools import iter_general_csv, iter_sub_prob_info
 
 import pyomo.environ as pyo
 import logging
@@ -57,6 +58,11 @@ class TwoStageDecompRedo:
     def solve_main_stage_model(self):
         # solve the main model, and compute the obj terms
         # return the optimal value of the solved main model
+        self.model_main.set_parameters(
+            param_dict={
+                'TimeLimit': 60
+            }
+        )
         self.model_main.solve()
         self.model_main.cal_detailed_obj()
 
@@ -69,6 +75,7 @@ class TwoStageDecompRedo:
         main_stage_objective_value = (
                 self.model_main.obj_term_value[ObjName.DG_FIXED_COST]
                 + self.model_main.obj_term_value[ObjName.LINE_HARDEN_COST]
+                + self.model_main.obj_term_value[ObjName.DG_VARIANT_COST]
         )
 
         # create the corresponding dict if
@@ -216,6 +223,17 @@ class TwoStageDecompRedo:
 
         return sce_obj_value_w_main, sce_obj_value
 
+    def write_iteration_csvs(self, output_dir: str, scenario_list: Optional[list] = None) -> None:
+        """Create or update iteration CSVs (iter_general_info.csv, iter_subproblem_info.csv)."""
+        if scenario_list is None:
+            scenario_list = self.scenario_list
+        iter_general_csv(ite_obj_value_dict=self.ite_obj_value_dict, output_dir=output_dir)
+        iter_sub_prob_info(
+            ite_obj_value_dict=self.ite_obj_value_dict,
+            output_dir=output_dir,
+            scenario_list=scenario_list,
+        )
+
     def gen_sce_bds_opt_cut(self, lp_opt_value=None, constr_dual_info=None, constr_var_map=None, forward_sol=None):
         """
         Idea: generate benders opt cuts components in the format of:
@@ -284,8 +302,18 @@ class TwoStageDecompRedo:
             inner_model.main_result = given_main_result
             inner_model.set_objective_function(lag_multiplier=given_dual_info)
 
+        inner_model.set_parameters(
+            param_dict={
+                'MIPGap': 0.002,
+                'TimeLimit': 6,
+                # 'MIPGapAbs': 10000
+            }
+        )
+
         inner_model.solve()
-        obtained_main_sol = inner_model.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+
+        main_var_name_list = sorted(given_main_result.keys())
+        obtained_main_sol = inner_model.get_result(main_var_name_list)
         inner_model.cal_detailed_obj()
         obtained_sub_obj = inner_model.obj_term_value[ObjName.SUB_OBJ_FUNCTION]
 
@@ -419,7 +447,8 @@ class TwoStageDecompRedo:
         lagrangian_cut_model.build_model()
         lagrangian_cut_model.solve()
 
-        main_sol = lagrangian_cut_model.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+        main_var_name_list = sorted(given_main_result.keys())
+        main_sol = lagrangian_cut_model.get_result(main_var_name_list)
         sub_obj_value = lagrangian_cut_model.get_result([VarName.AR_VAR_OBJ])[VarName.AR_VAR_OBJ]
         lag_multiplier = lagrangian_cut_model.get_result([VarName.LAG_MULTIPLIER])[VarName.LAG_MULTIPLIER]
 
@@ -515,3 +544,260 @@ class TwoStageDecompRedo:
         if should_add_cut is None or should_add_cut(lg_lhs, lg_rhs, cut_name):
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lg_lhs, cut_rhs=lg_rhs)
         return cut_name, lg_lhs, lg_rhs, sub_obj, main_sol
+
+    def add_aggregated_cut(
+        self,
+        cut_name_prefix: str,
+        ite_name: str,
+        cut_terms: List[Tuple[Any, Any, float]],
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+    ) -> Tuple[str, Any, Any]:
+        """
+        Add a single cut for this iteration using a probability-weighted sum of per-scenario cuts.
+        cut_terms: list of (lhs, rhs, weight) for each scenario group; weight is the scenario
+        probability (e.g. sum of sce_prob_dict[s] for s in that group).
+        The cut added is: sum(weight * lhs) >= sum(weight * rhs).
+        Returns (cut_name, agg_lhs, agg_rhs).
+        """
+        if not cut_terms:
+            raise ValueError("add_aggregated_cut requires at least one (lhs, rhs, weight) term")
+        agg_lhs = sum(w * lhs for (lhs, rhs, w) in cut_terms)
+        agg_rhs = sum(w * rhs for (lhs, rhs, w) in cut_terms)
+        cut_name = f"{cut_name_prefix}_agg_{ite_name}"
+        if should_add_cut is None or should_add_cut(agg_lhs, agg_rhs, cut_name):
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=agg_lhs, cut_rhs=agg_rhs)
+        return cut_name, agg_lhs, agg_rhs
+
+    def _gather_one_group_cut_data(
+        self,
+        sub_sce_list: List,
+        curr_main_result: Any,
+        frac_main_result: Any,
+        ite_name: str,
+        add_strengthen: bool,
+        add_lagrangian: bool,
+        main_stage_obj: Optional[float] = None,
+        incumbent_records: Optional[List] = None,
+    ) -> Tuple[float, Any, Any, Optional[Any], Optional[Any]]:
+        """
+        Build sub model for sub_sce_list, solve relaxed, optionally record incumbent, collect duals.
+        If add_strengthen or add_lagrangian, also build/solve frac model and return frac duals.
+        When incumbent_records is not None, solve sub, record, and append (sub_sce_list, sub_obj_w_main, sub_res).
+        Returns (sub_obj_value_for_benders, constr_dual_bi, constr_var_map_bi, constr_dual_frac, constr_var_map_frac).
+        constr_dual_frac and constr_var_map_frac are None when both add_strengthen and add_lagrangian are False.
+        """
+        self.build_sub_model_redo(
+            sub_model_sce_list=sub_sce_list,
+            given_main_result=curr_main_result,
+        )
+        local_copy_var_constr_name = sorted(self.current_sub_model.local_copy_constr_info.keys())
+        self.solve_relaxed_sub_model()
+        sub_obj_value_for_benders = self.current_sub_model.get_relaxed_obj_value()
+
+        if incumbent_records is not None:
+            self.solve_sub_model()
+            sub_obj_w_main, _ = self.record_sub_model(
+                main_stage_obj_value=main_stage_obj,
+                ite_name=ite_name,
+            )
+            sub_res = self.current_sub_model.get_result(
+                [VarName.DG_ACTIVE_POWER, VarName.DG_RATED_POWER]
+            )
+            incumbent_records.append((sub_sce_list, sub_obj_w_main, sub_res))
+
+        constr_dual_bi, constr_var_map_bi = self.current_sub_model.collect_dual_opt_sol(
+            constr_to_collect_list=local_copy_var_constr_name
+        )
+
+        constr_dual_frac, constr_var_map_frac = None, None
+        if add_strengthen or add_lagrangian:
+            self.build_sub_frac_model(
+                sub_model_sce_list=sub_sce_list,
+                given_main_frac_result=frac_main_result,
+            )
+            self.solve_sub_frac_model()
+            constr_dual_frac, constr_var_map_frac = self.curr_sub_frac_model.collect_dual_opt_sol(
+                constr_to_collect_list=local_copy_var_constr_name
+            )
+
+        return (
+            sub_obj_value_for_benders,
+            constr_dual_bi,
+            constr_var_map_bi,
+            constr_dual_frac,
+            constr_var_map_frac,
+        )
+
+    def run_iteration_cuts_per_scenario(
+        self,
+        sce_group_list: List[List],
+        ite_name: str,
+        ite_num: int,
+        curr_main_result: Any,
+        frac_main_result: Any,
+        benders_cut_iter_range: Optional[Tuple[int, int]],
+        strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
+        lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+        *,
+        main_stage_obj: Optional[float] = None,
+        incumbent_records: Optional[List] = None,
+        max_lagrangian_ite: int = 10,
+    ) -> None:
+        """
+        For each scenario group in sce_group_list: gather cut data, then add one Benders / strengthened
+        Benders / Lagrangian cut per group (according to iter ranges). Corresponds to use_aggregated_cuts=False.
+        """
+        add_benders = (
+            benders_cut_iter_range is not None
+            and benders_cut_iter_range[0] <= ite_num <= benders_cut_iter_range[1]
+        )
+        add_strengthen = (
+            strengthen_benders_cut_iter_range is not None
+            and strengthen_benders_cut_iter_range[0] <= ite_num <= strengthen_benders_cut_iter_range[1]
+        )
+        add_lagrangian = (
+            lagrangian_cut_iter_range is not None
+            and lagrangian_cut_iter_range[0] <= ite_num <= lagrangian_cut_iter_range[1]
+        )
+
+        for sub_sce_list in sce_group_list:
+            (
+                sub_obj_value_for_benders,
+                constr_dual_bi,
+                constr_var_map_bi,
+                constr_dual_frac,
+                constr_var_map_frac,
+            ) = self._gather_one_group_cut_data(
+                sub_sce_list=sub_sce_list,
+                curr_main_result=curr_main_result,
+                frac_main_result=frac_main_result,
+                ite_name=ite_name,
+                add_strengthen=add_strengthen,
+                add_lagrangian=add_lagrangian,
+                main_stage_obj=main_stage_obj,
+                incumbent_records=incumbent_records,
+            )
+
+            if add_benders:
+                self.add_benders_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    sub_obj_value=sub_obj_value_for_benders,
+                    constr_dual_info=constr_dual_bi,
+                    constr_var_map=constr_var_map_bi,
+                    forward_sol=curr_main_result,
+                )
+
+            if add_strengthen and constr_dual_frac is not None:
+                self.add_strengthen_benders_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    given_main_result=frac_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                )
+
+            if add_lagrangian and constr_dual_frac is not None:
+                self.add_lagrangian_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    given_main_result=frac_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                    max_ite_num=max_lagrangian_ite,
+                )
+
+    def run_iteration_cuts_aggregated(
+        self,
+        sce_group_list: List[List],
+        ite_name: str,
+        ite_num: int,
+        curr_main_result: Any,
+        frac_main_result: Any,
+        benders_cut_iter_range: Optional[Tuple[int, int]],
+        strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
+        lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+        *,
+        main_stage_obj: Optional[float] = None,
+        incumbent_records: Optional[List] = None,
+        max_lagrangian_ite: int = 10,
+    ) -> None:
+        """
+        For each scenario group: gather cut data and collect (lhs, rhs, weight). After the loop, add
+        exactly one cut per type using probability-weighted lhs and rhs. Corresponds to use_aggregated_cuts=True.
+        """
+        add_benders = (
+            benders_cut_iter_range is not None
+            and benders_cut_iter_range[0] <= ite_num <= benders_cut_iter_range[1]
+        )
+        add_strengthen = (
+            strengthen_benders_cut_iter_range is not None
+            and strengthen_benders_cut_iter_range[0] <= ite_num <= strengthen_benders_cut_iter_range[1]
+        )
+        add_lagrangian = (
+            lagrangian_cut_iter_range is not None
+            and lagrangian_cut_iter_range[0] <= ite_num <= lagrangian_cut_iter_range[1]
+        )
+
+        benders_terms: List[Tuple[Any, Any, float]] = []
+        strengthen_terms: List[Tuple[Any, Any, float]] = []
+        lagrangian_terms: List[Tuple[Any, Any, float]] = []
+
+        for sub_sce_list in sce_group_list:
+            (
+                sub_obj_value_for_benders,
+                constr_dual_bi,
+                constr_var_map_bi,
+                constr_dual_frac,
+                constr_var_map_frac,
+            ) = self._gather_one_group_cut_data(
+                sub_sce_list=sub_sce_list,
+                curr_main_result=curr_main_result,
+                frac_main_result=frac_main_result,
+                ite_name=ite_name,
+                add_strengthen=add_strengthen,
+                add_lagrangian=add_lagrangian,
+                main_stage_obj=main_stage_obj,
+                incumbent_records=incumbent_records,
+            )
+
+            weight = sum(self.sce_prob_dict[s] for s in sub_sce_list)
+
+            if add_benders:
+                bd_lhs, bd_rhs = self.gen_sce_bds_opt_cut(
+                    lp_opt_value=sub_obj_value_for_benders,
+                    constr_dual_info=constr_dual_bi,
+                    constr_var_map=constr_var_map_bi,
+                    forward_sol=curr_main_result,
+                )
+                benders_terms.append((bd_lhs, bd_rhs, weight))
+
+            if add_strengthen and constr_dual_frac is not None:
+                sbd_lhs, sbd_rhs, _, _ = self.gen_sce_strengthen_bds_cut(
+                    sub_model_sce_list=sub_sce_list,
+                    given_main_result=frac_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                )
+                strengthen_terms.append((sbd_lhs, sbd_rhs, weight))
+
+            if add_lagrangian and constr_dual_frac is not None:
+                lg_lhs, lg_rhs, _, _ = self.gen_sub_sce_lag_cut_heuristic(
+                    sub_model_sce_list=sub_sce_list,
+                    given_main_result=frac_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                    max_ite_num=max_lagrangian_ite,
+                )
+                lagrangian_terms.append((lg_lhs, lg_rhs, weight))
+
+        if benders_terms:
+            self.add_aggregated_cut(cut_name_prefix="bd", ite_name=ite_name, cut_terms=benders_terms)
+        if strengthen_terms:
+            self.add_aggregated_cut(
+                cut_name_prefix="str_bd", ite_name=ite_name, cut_terms=strengthen_terms
+            )
+        if lagrangian_terms:
+            self.add_aggregated_cut(
+                cut_name_prefix="str_lag", ite_name=ite_name, cut_terms=lagrangian_terms
+            )

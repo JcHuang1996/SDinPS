@@ -3,9 +3,13 @@
 # @Author   : J. Huang
 # @Email    : jiachenghuang0601@gmail.com
 
+import ast
+import json
 import logging
+import os
 from typing import Tuple, Optional
 
+import pandas as pd
 from pyomo.repn.standard_repn import generate_standard_repn
 import pyomo.environ as pyo
 
@@ -142,3 +146,130 @@ def bi_var_counter(var_result_dict):
                 raise ValueError('the value of variable must be binary for this function')
 
     return zero_var_idx, one_var_idx
+
+
+def _parse_key(k: str):
+    """If *k* looks like a string-repr of a tuple, e.g. \"('a', 'b')\", return the actual tuple; else return *k*."""
+    if k.startswith('(') and k.endswith(')'):
+        try:
+            val = ast.literal_eval(k)
+            if isinstance(val, tuple):
+                return val
+        except (ValueError, SyntaxError):
+            pass
+    return k
+
+
+def _restore_keys(d: dict) -> dict:
+    """Recursively convert string-encoded tuple keys back to real tuples in a two-layer solution dict."""
+    return {var_name: {_parse_key(k): v for k, v in inner.items()} for var_name, inner in d.items()}
+
+
+def _sce_list_to_filename(scenario_list: list) -> str:
+    """Convert a scenario list to its solution JSON filename (mirrors solution_recorder.py)."""
+    sce_str = str(scenario_list)
+    return (sce_str.replace("'", "").replace("[", "").replace("]", "")
+                   .replace(", ", "_").replace(" ", "_").strip() + ".json")
+
+
+def analyze_scenario_solutions(dataset_path: str, scenario_list: list, hat: float):
+    """
+    Compute weighted-average (expectation) of solution variables across scenarios,
+    then partition variable keys by whether their expectation exceeds *hat*.
+
+    When the overall solution for the full *scenario_list* exists in the solutions
+    folder, also computes the "true" partition (keys with value 1 vs 0 in that
+    overall solution), the corresponding expectation sums, and a suggested hat
+    via grid search that best matches the true partition.
+
+    Returns:
+        expectation      – dict {var_name: {key: weighted_avg, ...}, ...}
+        keys_above       – dict {var_name: sorted list of keys where expectation > hat}
+        keys_below       – dict {var_name: sorted list of keys where expectation <= hat}
+        sum_above        – dict {var_name: sum of expectations for keys in keys_above}
+        sum_below        – dict {var_name: sum of expectations for keys in keys_below}
+        true_keys_above  – (or None) dict {var_name: sorted keys with value 1 in overall solution}
+        true_keys_below  – (or None) dict {var_name: sorted keys with value != 1 in overall solution}
+        true_sum_above   – (or None) dict {var_name: sum of expectations for keys in true_keys_above}
+        true_sum_below   – (or None) dict {var_name: sum of expectations for keys in true_keys_below}
+        suggested_hat    – (or None) float, hat that best reproduces the true partition
+    """
+    dataset_path = os.path.abspath(dataset_path)
+    solutions_dir = os.path.join(dataset_path, 'solutions')
+
+    # Read scenario probabilities and normalise to the selected subset
+    prob_df = pd.read_csv(os.path.join(dataset_path, 's_probability.csv'))
+    prob_map = dict(zip(prob_df['scenario_id'], prob_df['probability']))
+    raw_weights = {s: prob_map[s] for s in scenario_list}
+    total_weight = sum(raw_weights.values())
+    weights = {s: w / total_weight for s, w in raw_weights.items()}
+
+    # Load individual-scenario solution JSONs
+    solutions = {}
+    for s in scenario_list:
+        filepath = os.path.join(solutions_dir, _sce_list_to_filename([s]))
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Solution file not found for scenario '{s}': {filepath}")
+        with open(filepath, 'r', encoding='utf-8') as f:
+            solutions[s] = _restore_keys(json.load(f))
+
+    # Compute expectation (weighted average) keeping the same nested-dict structure
+    template = solutions[scenario_list[0]]
+    expectation = {}
+    for var_name in template:
+        expectation[var_name] = {}
+        for key in template[var_name]:
+            expectation[var_name][key] = sum(
+                weights[s] * solutions[s][var_name][key] for s in scenario_list
+            )
+
+    # Partition keys into above / below hat, and compute grouped sums
+    keys_above, keys_below = {}, {}
+    sum_above, sum_below = {}, {}
+    for var_name, key_vals in expectation.items():
+        above = sorted(k for k, v in key_vals.items() if v > hat)
+        below = sorted(k for k, v in key_vals.items() if v <= hat)
+        keys_above[var_name] = above
+        keys_below[var_name] = below
+        sum_above[var_name] = sum(key_vals[k] for k in above)
+        sum_below[var_name] = sum(key_vals[k] for k in below)
+
+    # --- True partition & suggested hat (only when overall solution exists) ---
+    overall_path = os.path.join(solutions_dir, _sce_list_to_filename(scenario_list))
+    if not os.path.exists(overall_path):
+        return (expectation, keys_above, keys_below, sum_above, sum_below,
+                None, None, None, None, None)
+
+    with open(overall_path, 'r', encoding='utf-8') as f:
+        overall_sol = _restore_keys(json.load(f))
+
+    # True partition: value == 1 → above, otherwise → below
+    true_keys_above, true_keys_below = {}, {}
+    true_sum_above, true_sum_below = {}, {}
+    true_above_sets = {}
+    for var_name in expectation:
+        t_above = sorted(k for k, v in overall_sol[var_name].items() if v > 0.9)
+        t_below = sorted(k for k, v in overall_sol[var_name].items() if v <= 0.9)
+        true_keys_above[var_name] = t_above
+        true_keys_below[var_name] = t_below
+        true_above_sets[var_name] = set(t_above)
+        true_sum_above[var_name] = sum(expectation[var_name][k] for k in t_above)
+        true_sum_below[var_name] = sum(expectation[var_name][k] for k in t_below)
+
+    # Grid search: test every distinct expectation value (+ one below min) as candidate hat.
+    # The partition {k : exp[k] > hat} only changes at these breakpoints.
+    all_vals = sorted({v for kv in expectation.values() for v in kv.values()})
+    candidates = [all_vals[0] - 1.0] + all_vals
+
+    best_hat, best_diff, best_sum_gap = None, float('inf'), float('inf')
+    for c in candidates:
+        diff, sum_gap = 0, 0.0
+        for var_name, key_vals in expectation.items():
+            c_above = {k for k, v in key_vals.items() if v > c}
+            diff += len(c_above.symmetric_difference(true_above_sets[var_name]))
+            sum_gap += abs(sum(key_vals[k] for k in c_above) - true_sum_above[var_name])
+        if diff < best_diff or (diff == best_diff and sum_gap < best_sum_gap):
+            best_hat, best_diff, best_sum_gap = c, diff, sum_gap
+
+    return (expectation, keys_above, keys_below, sum_above, sum_below,
+            true_keys_above, true_keys_below, true_sum_above, true_sum_below, best_hat)

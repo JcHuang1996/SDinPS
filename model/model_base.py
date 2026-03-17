@@ -163,8 +163,15 @@ class ModelBase:
         for key, value in param_dict.items():
             self.solver.options[key] = value
 
-    def solve(self):
+    def solve(self, param_dict=None):
         logger.info(f'Optimizing model {self.model_name}')
+
+        if param_dict is None:
+            self.set_parameters(
+                param_dict={
+                    'MIPGap': 0.002
+                }
+            )
 
         self._last_results = self.solver.solve(self.model, tee=True, load_solutions=True)
         self._set_solve_status_from_results(self._last_results)

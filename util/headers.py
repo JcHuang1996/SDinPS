@@ -76,3 +76,10 @@ class NodeCoordinateHeader:
     NODE_ID = 'node_id'
     X = 'x'
     Y = 'y'
+
+
+class DgRatedPowerHeader:
+    DG_TYPE = 'DG_type'
+    RATED_POWER = 'rated_power'
+    UNIT_PRICE = 'unit_price'
+    EXTRA_ADJUSTMENT = 'extra_adjustment'

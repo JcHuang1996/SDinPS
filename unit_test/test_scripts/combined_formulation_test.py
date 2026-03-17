@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def run_combined_formulation_test(
     test_file_path: str = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file',
-    data_set_name: str = 'function_test',
+    data_set_name: str = 'function_test_fixed_rated_p',
     scenario_list_assigned: list = None,
     time_list_assigned: list = None,
     output_path: str = None,
@@ -46,7 +46,7 @@ def run_combined_formulation_test(
         generate_plot: Whether to generate and display the plot. Default: True.
     """
     if scenario_list_assigned is None:
-        scenario_list_assigned = ['s_1', 's_2', 's_3']
+        scenario_list_assigned = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6']
     if time_list_assigned is None:
         time_list_assigned = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     
@@ -80,7 +80,11 @@ def run_combined_formulation_test(
 
     m_combined.solve()
     m_combined.cal_detailed_obj()
-    m_combined.get_result([VarName.DG_INSTALL, VarName.LINE_CONNECTED, VarName.LINE_HARDEN])
+    m_combined.get_result(
+        [VarName.DG_INSTALL,
+         VarName.LINE_HARDEN,
+         VarName.DG_INSTALL_TYPE]
+    )
 
     print('Solved')
     

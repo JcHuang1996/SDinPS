@@ -8,6 +8,7 @@ import os
 import sys
 
 from algo.two_stage_decomp_redo import TwoStageDecompRedo
+from algo.algo_simple_tools import analyze_scenario_solutions
 
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -20,7 +21,7 @@ from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
 
-from util.tools import iter_general_csv, iter_sub_prob_info, write_decomp_run_parameters, write_power_usage_capacity_ratio
+from util.tools import write_decomp_run_parameters, write_power_usage_capacity_ratio
 
 from datetime import datetime
 import copy
@@ -57,6 +58,7 @@ def run_decomp_module_test(
     strengthen_benders_cut_iter_range: Optional[Tuple[int, int]] = None,
     lagrangian_cut_iter_range: Optional[Tuple[int, int]] = None,
     record_incumbent_every_k: Optional[int] = None,
+    use_aggregated_cuts: bool = False,
 ):
     """Run the decomposition module test.
 
@@ -76,6 +78,9 @@ def run_decomp_module_test(
             iterations (0, k, 2k, ...). If None, record every iteration. When not recording, solve_sub_model() is
             skipped and Benders cut uses relaxed LP objective (get_relaxed_obj_value()); strengthen/Lagrangian
             cuts are unchanged (they use curr_sub_frac_model only, not current_sub_model).
+        use_aggregated_cuts: If False, generate and add one cut per scenario group (sub_sce_list). If True,
+            collect (lhs, rhs, weight) for each group with weight = sum of scenario probabilities, then add
+            exactly one cut per iteration per cut type using probability-weighted lhs and rhs.
     """
     # Set default values
     if scenario_list is None:
@@ -131,6 +136,8 @@ def run_decomp_module_test(
     r.read()
     print("CSV read success:")
 
+    data_read_path = test_file_path + '/' + data_set_name + '/'
+
     two_stage_decomp_module = TwoStageDecompRedo(
         raw_data=r.raw_data,
         time_list=time_list,
@@ -140,6 +147,23 @@ def run_decomp_module_test(
     # build main model
     two_stage_decomp_module.build_main_stage_model()
 
+    (expectation, keys_above, keys_below, sum_above, sum_below,
+     true_keys_above, true_keys_below, true_sum_above, true_sum_below, best_hat) = analyze_scenario_solutions(
+        dataset_path=data_read_path,
+        scenario_list=scenario_list,
+        hat=0.3334
+    )
+
+    true_sum_above_value = sum(true_sum_above.values())
+    true_sum_below_value = sum(true_sum_below.values())
+
+    two_stage_decomp_module.model_main.set_pretrained_cut(
+        above_var=true_keys_above,
+        below_var=true_keys_below,
+        above_sum=true_sum_above_value,
+        below_sum=true_sum_below_value,
+    )
+
     # decide how to group and iterate the scenarios
     sce_group_list = [
         [s] for s in scenario_list
@@ -148,7 +172,12 @@ def run_decomp_module_test(
     best_obj = float('inf')
     best_sub_results = None  # best-iteration sub results: {VarName.DG_ACTIVE_POWER: {(j,t,s): v}, VarName.DG_RATED_POWER: {(j,s): v}}
 
+    if enable_result_output:
+        two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
+
     for ite_num in range(max_iterations):
+
+        logger.info(f"Current iteration: {ite_num}")
 
         ite_name = str(ite_num)
         temp_iter_sub_results = {VarName.DG_ACTIVE_POWER: {}, VarName.DG_RATED_POWER: {}}
@@ -160,7 +189,7 @@ def run_decomp_module_test(
         main_stage_obj, main_bound = two_stage_decomp_module.record_main_stage_model(ite_name=ite_name)
 
         # record the result of the main model required by the sub problems
-        curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+        curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
 
         # the best incumbent objective value will be given by the weighted sum of sub-problem objective values
         # starting from 0 (only when recording)
@@ -169,98 +198,48 @@ def run_decomp_module_test(
 
         # the following part aims on collecting relaxed solution from main problem for better cut
         two_stage_decomp_module.solve_main_stage_relaxed_model()
-        frac_main_result = two_stage_decomp_module.model_main.get_result_relaxed([VarName.DG_INSTALL, VarName.LINE_HARDEN])
+        frac_main_result = two_stage_decomp_module.model_main.get_result_relaxed([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
 
-        # iterating by the above division
-        for sub_sce_list in sce_group_list:
+        sce_prob = two_stage_decomp_module.sce_prob_dict
+        incumbent_records = [] if do_record_incumbent else None
 
-            # solve sub model based on binary main solution for classical benders cut and recording real sub problem obj
-            two_stage_decomp_module.build_sub_model_redo(
-                sub_model_sce_list=sub_sce_list,
-                given_main_result=curr_main_result,
+        if use_aggregated_cuts:
+            two_stage_decomp_module.run_iteration_cuts_aggregated(
+                sce_group_list=sce_group_list,
+                ite_name=ite_name,
+                ite_num=ite_num,
+                curr_main_result=curr_main_result,
+                frac_main_result=frac_main_result,
+                benders_cut_iter_range=benders_cut_iter_range,
+                strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
+                lagrangian_cut_iter_range=lagrangian_cut_iter_range,
+                main_stage_obj=main_stage_obj if do_record_incumbent else None,
+                incumbent_records=incumbent_records,
+                max_lagrangian_ite=10,
+            )
+        else:
+            two_stage_decomp_module.run_iteration_cuts_per_scenario(
+                sce_group_list=sce_group_list,
+                ite_name=ite_name,
+                ite_num=ite_num,
+                curr_main_result=curr_main_result,
+                frac_main_result=frac_main_result,
+                benders_cut_iter_range=benders_cut_iter_range,
+                strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
+                lagrangian_cut_iter_range=lagrangian_cut_iter_range,
+                main_stage_obj=main_stage_obj if do_record_incumbent else None,
+                incumbent_records=incumbent_records,
+                max_lagrangian_ite=10,
             )
 
-            local_copy_var_constr_dict = two_stage_decomp_module.current_sub_model.local_copy_constr_info.copy()
-            local_copy_var_constr_name = sorted(local_copy_var_constr_dict.keys())
-
-            two_stage_decomp_module.solve_relaxed_sub_model()
-            # Benders cut uses relaxed LP objective; collect_dual_opt_sol reads from model_relax (see model_sub.py)
-            sub_obj_value_for_benders = two_stage_decomp_module.current_sub_model.get_relaxed_obj_value()
-
-            if do_record_incumbent:
-                two_stage_decomp_module.solve_sub_model()
-                sub_obj_w_main, _ = two_stage_decomp_module.record_sub_model(
-                    main_stage_obj_value=main_stage_obj,
-                    ite_name=ite_name,
-                )
-                curr_incumbent_obj_value += sub_obj_w_main * sum(
-                    two_stage_decomp_module.sce_prob_dict[s_idx]
-                    for s_idx in sub_sce_list
-                )
-                # collect pg and pgrt from current sub for possible best-iteration save
-                sub_res = two_stage_decomp_module.current_sub_model.get_result(
-                    [VarName.DG_ACTIVE_POWER, VarName.DG_RATED_POWER]
-                )
+        if incumbent_records is not None:
+            for sub_sce_list, sub_obj_w_main, sub_res in incumbent_records:
+                curr_incumbent_obj_value += sub_obj_w_main * sum(sce_prob[s_idx] for s_idx in sub_sce_list)
                 for key, val in sub_res[VarName.DG_ACTIVE_POWER].items():
                     temp_iter_sub_results[VarName.DG_ACTIVE_POWER][key] = val
                 for j, val in sub_res[VarName.DG_RATED_POWER].items():
                     for s in sub_sce_list:
                         temp_iter_sub_results[VarName.DG_RATED_POWER][(j, s)] = val
-
-            constr_dual_via_bi_main, constr_var_map_via_bi_main = two_stage_decomp_module.current_sub_model.collect_dual_opt_sol(
-                constr_to_collect_list=local_copy_var_constr_name
-            )
-
-            if benders_cut_iter_range is not None:
-                first_bd, last_bd = benders_cut_iter_range
-                if first_bd <= ite_num <= last_bd:
-                    two_stage_decomp_module.add_benders_cut(
-                        sub_sce_list=sub_sce_list,
-                        ite_name=ite_name,
-                        sub_obj_value=sub_obj_value_for_benders,
-                        constr_dual_info=constr_dual_via_bi_main,
-                        constr_var_map=constr_var_map_via_bi_main,
-                        forward_sol=curr_main_result,
-                    )
-
-            add_strengthen = (
-                strengthen_benders_cut_iter_range is not None
-                and strengthen_benders_cut_iter_range[0] <= ite_num <= strengthen_benders_cut_iter_range[1]
-            )
-            add_lagrangian = (
-                lagrangian_cut_iter_range is not None
-                and lagrangian_cut_iter_range[0] <= ite_num <= lagrangian_cut_iter_range[1]
-            )
-            # Strengthen Benders and Lagrangian use curr_sub_frac_model only (frac_main_result, duals from
-            # solve_sub_frac_model); they do not use current_sub_model or solve_sub_model result.
-            if add_strengthen or add_lagrangian:
-                two_stage_decomp_module.build_sub_frac_model(
-                    sub_model_sce_list=sub_sce_list,
-                    given_main_frac_result=frac_main_result
-                )
-                two_stage_decomp_module.solve_sub_frac_model()
-                constr_dual_via_frac_main, constr_var_map_via_frac_main = two_stage_decomp_module.curr_sub_frac_model.collect_dual_opt_sol(
-                    constr_to_collect_list=local_copy_var_constr_name
-                )
-
-                if add_strengthen:
-                    two_stage_decomp_module.add_strengthen_benders_cut(
-                        sub_sce_list=sub_sce_list,
-                        ite_name=ite_name,
-                        given_main_result=frac_main_result,
-                        given_dual_info=constr_dual_via_frac_main,
-                        constr_var_map=constr_var_map_via_frac_main,
-                    )
-
-                if add_lagrangian:
-                    two_stage_decomp_module.add_lagrangian_cut(
-                        sub_sce_list=sub_sce_list,
-                        ite_name=ite_name,
-                        given_main_result=frac_main_result,
-                        given_dual_info=constr_dual_via_frac_main,
-                        constr_var_map=constr_var_map_via_frac_main,
-                        max_ite_num=10,
-                    )
 
         if do_record_incumbent:
             two_stage_decomp_module.ite_obj_value_dict[ite_name]['sub_obj(best_incumbent)'] = {
@@ -270,30 +249,26 @@ def run_decomp_module_test(
             best_obj = min(best_obj, curr_incumbent_obj_value)
             if new_best:
                 best_sub_results = copy.deepcopy(temp_iter_sub_results)
-            if best_obj - main_bound <= 0.01 * best_obj:
-                logger.info(f'Ite {ite_name} has reached convergence by the gap of 1%')
-                break
+        if enable_result_output:
+            two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
+        if do_record_incumbent and best_obj - main_bound <= 0.01 * best_obj:
+            logger.info(f'Ite {ite_name} has reached convergence by the gap of 1%')
+            break
 
     two_stage_decomp_module.model_main.write_file(file_name=output_dir+'/main_model.lp')
 
-    iter_general_csv(
-        ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
-        output_dir=output_dir
-    )
-    iter_sub_prob_info(
-        ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
-        output_dir=output_dir,
-        scenario_list=scenario_list
-    )
-
     write_decomp_run_parameters(
         output_dir=output_dir,
-        scenario_list=scenario_list,
-        data_set_name=data_set_name,
-        max_iterations=max_iterations,
-        benders_cut_iter_range=benders_cut_iter_range,
-        strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
-        lagrangian_cut_iter_range=lagrangian_cut_iter_range,
+        params={
+            "scenario_list": scenario_list,
+            "data_set_name": data_set_name,
+            "max_iterations": max_iterations,
+            "benders_cut_iter_range": benders_cut_iter_range,
+            "strengthen_benders_cut_iter_range": strengthen_benders_cut_iter_range,
+            "lagrangian_cut_iter_range": lagrangian_cut_iter_range,
+            "record_incumbent_every_k": record_incumbent_every_k,
+            "use_aggregated_cuts": use_aggregated_cuts,
+        },
     )
 
     if enable_result_output and best_sub_results is not None:
@@ -306,27 +281,28 @@ def run_decomp_module_test(
     plot_iter_obj_curves(
         ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
         output_dir=output_dir,
-        real_objective_value=1729496
+        real_objective_value=3239346
     )
 
 
 
 if __name__ == "__main__":
-    _max_iter = 20
+    _max_iter = 150
     run_decomp_module_test(
         enable_log_output=False,
         enable_result_output=True,
         # scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
-        # scenario_list=['s_1', 's_3', 's_5'],
-        scenario_list=['s_1', 's_2', 's_3'],
+        scenario_list=['s_1', 's_3', 's_5'],
+        # scenario_list=['s_1', 's_2', 's_3'],
         time_list=None,
         test_read_method=None,
         test_file_path=None,
-        data_set_name='function_test_symm_broken',
+        data_set_name='function_test_fixed_rated_p',
         max_iterations=_max_iter,
         output_label='test',
         benders_cut_iter_range=(0, _max_iter - 1),
         strengthen_benders_cut_iter_range=(0, _max_iter - 1),
         lagrangian_cut_iter_range=None,
-        record_incumbent_every_k=2,
+        record_incumbent_every_k=4,
+        use_aggregated_cuts=False
     )

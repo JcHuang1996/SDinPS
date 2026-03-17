@@ -109,6 +109,14 @@ class LocalCSVMixin:
             logger.error("Error: Cannot find s_line_state_w_o_harden.csv")
             raise
 
+        # read DG type and rated power
+        try:
+            df_dg_rated_power = pd.read_csv(read_path + 'dg_rated_power.csv')
+            self.raw_data[InputDataName.DG_RATED_POWER_DF] = df_dg_rated_power
+        except FileNotFoundError:
+            logger.error("Error: Cannot find dg_rated_power.csv")
+            raise
+
         logger.info('raw data reading finished')
         
         return self.raw_data

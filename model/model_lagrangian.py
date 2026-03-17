@@ -59,9 +59,6 @@ class ModelInnerMinimizationProblem(ModelCombined):
     def set_objective_function(self, lag_multiplier=None):
 
         self.obj_term[ObjName.SUB_OBJ_FUNCTION] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
-            for j in self.data[DataName.LIST_NODE]
-        ) + pyo.quicksum(
             self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
             for j in self.data[DataName.LIST_NODE]
             for t in self.data[DataName.LIST_TIME]
@@ -221,9 +218,6 @@ class ModelLagrangianCutDeterministic(ModelCombined):
 
         self.add_constr(
             self.var[VarName.AR_VAR_OBJ] == pyo.quicksum(
-                self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
-                for j in self.data[DataName.LIST_NODE]
-            ) + pyo.quicksum(
                 self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
                 for j in self.data[DataName.LIST_NODE]
                 for t in self.data[DataName.LIST_TIME]

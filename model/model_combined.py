@@ -55,6 +55,15 @@ class ModelCombined(ModelBase):
             for j in self.data[DataName.LIST_NODE]
         }
 
+        self.var[VarName.DG_INSTALL_TYPE] = {
+            (j, typ): self.add_var(
+                domain=pyo.Binary,
+                name=f'{VarName.DG_INSTALL_TYPE}_({j},{typ})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for typ in self.data[DataName.LIST_DG_TYPE]
+        }
+
     def add_vars_basic_generator_c(self):
 
         self.var[VarName.DG_RATED_POWER] = {
@@ -196,11 +205,32 @@ class ModelCombined(ModelBase):
             name=ConstrName.DG_UPPERBOUND
         )
 
+        # # DG_INSTALL_TYPE[j, typ] <= DG_INSTALL[j] for all j, typ
+        # for j in self.data[DataName.LIST_NODE]:
+        #     for typ in self.data[DataName.LIST_DG_TYPE]:
+        #         self.add_constr(
+        #             self.var[VarName.DG_INSTALL_TYPE][j, typ] <= self.var[VarName.DG_INSTALL][j],
+        #             name=f'{ConstrName.DG_INSTALL_TYPE_UB}_{j}_{typ}'
+        #         )
+
+        # exactly one type per node when installed; zero when not installed
+        for j in self.data[DataName.LIST_NODE]:
+            self.add_constr(
+                pyo.quicksum(
+                    self.var[VarName.DG_INSTALL_TYPE][j, typ] for typ in self.data[DataName.LIST_DG_TYPE]
+                ) == self.var[VarName.DG_INSTALL][j],
+                name=f'{ConstrName.DG_INSTALL_TYPE_ONE}_{j}'
+            )
+
     def add_constr_DG_rated_power_ub(self):
+        # p^{Grt}_j = sum_typ (rated_power[typ] * DG_INSTALL_TYPE[j, typ])
         for j in self.data[DataName.LIST_NODE]:
             self.add_constr(
                 self.var[VarName.DG_RATED_POWER][j]
-                <= self.data[DataName.NUM_RATED_POWER_UB] * self.var[VarName.DG_INSTALL][j],
+                == pyo.quicksum(
+                    self.data[DataName.DICT_DG_RATED_POWER][typ] * self.var[VarName.DG_INSTALL_TYPE][j, typ]
+                    for typ in self.data[DataName.LIST_DG_TYPE]
+                ),
                 name=f'{ConstrName.DG_OPERATION}_{j}'
             )
 
@@ -452,9 +482,13 @@ class ModelCombined(ModelBase):
             for j in self.data[DataName.LIST_NODE]
         )
 
+        # variant cost at node j: rated_power * unit_price + extra_adjustment (for chosen DG type)
         self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
+            (self.data[DataName.DICT_DG_RATED_POWER][typ] * self.data[DataName.DICT_DG_UNIT_PRICE][typ]
+             + self.data[DataName.DICT_DG_EXTRA_ADJUSTMENT][typ])
+            * self.var[VarName.DG_INSTALL_TYPE][j, typ]
             for j in self.data[DataName.LIST_NODE]
+            for typ in self.data[DataName.LIST_DG_TYPE]
         )
 
         self.obj_term[ObjName.DG_GENERATING_COST] = pyo.quicksum(

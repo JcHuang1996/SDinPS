@@ -50,10 +50,14 @@ class ModelMain(ModelCombined):
             for j in self.data[DataName.LIST_NODE]
         )
 
-        # self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
-        #     self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
-        #     for j in self.data[DataName.LIST_NODE]
-        # )
+        # variant cost at node j: rated_power * unit_price + extra_adjustment (for chosen DG type)
+        self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
+            (self.data[DataName.DICT_DG_RATED_POWER][typ] * self.data[DataName.DICT_DG_UNIT_PRICE][typ]
+             + self.data[DataName.DICT_DG_EXTRA_ADJUSTMENT][typ])
+            * self.var[VarName.DG_INSTALL_TYPE][j, typ]
+            for j in self.data[DataName.LIST_NODE]
+            for typ in self.data[DataName.LIST_DG_TYPE]
+        )
 
         self.obj_term[ObjName.LINE_HARDEN_COST] = pyo.quicksum(
             self.data[DataName.DICT_LINE_COST_HARDEN][i, j] * self.var[VarName.LINE_HARDEN][i, j]
@@ -67,7 +71,7 @@ class ModelMain(ModelCombined):
 
         self.set_objective(
             self.obj_term[ObjName.DG_FIXED_COST]
-            # + self.obj_term[ObjName.DG_VARIANT_COST]
+            + self.obj_term[ObjName.DG_VARIANT_COST]
             + self.obj_term[ObjName.LINE_HARDEN_COST]
             + self.obj_term[ObjName.SUB_OBJ_TERM],
             sense=pyo.minimize
@@ -137,3 +141,21 @@ class ModelMain(ModelCombined):
         :return:
         """
         self.add_constr(cut_lhs >= cut_rhs, name=cut_name)
+
+    def set_pretrained_cut(self, above_var, below_var, above_sum, below_sum):
+
+        above_var_name_list = sorted(above_var.keys())
+        below_var_name_list = sorted(below_var.keys())
+
+        self.add_constr(
+            pyo.quicksum(
+                self.var[var_name][var_key] for var_name in above_var_name_list for var_key in above_var[var_name]
+            ) >= above_sum,
+            name=f'PrTC_above'
+        )
+        self.add_constr(
+            pyo.quicksum(
+                self.var[var_name][var_key] for var_name in below_var_name_list for var_key in below_var[var_name]
+            ) <= below_sum,
+            name='PrTC_below'
+        )

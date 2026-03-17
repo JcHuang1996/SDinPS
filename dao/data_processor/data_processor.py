@@ -46,6 +46,7 @@ class DataProcessor:
         self.node_data()
         self.line_data()
         self.node_data()
+        self.equipment_data()
         self.scenario_data()
         self.parameter_data()
 
@@ -111,6 +112,30 @@ class DataProcessor:
             j: alpha_value for j in self.data[DataName.LIST_NODE]
         }
 
+    def equipment_data(self):
+        """
+        This function processes equipment data (DG type and rated power) which is independent of the scenarios.
+        The function gives its output by directly modify the self.data, rather than returning.
+        :return: None
+        """
+        # ========================================
+        # process equipment data from dg_rated_power.csv:
+        # LIST_DG_TYPE: 'DG_type' in dg_rated_power.csv
+        # DICT_DG_RATED_POWER: {DG_type: rated_power, ...}
+        # DICT_DG_UNIT_PRICE: {DG_type: unit_price, ...}
+        # DICT_DG_EXTRA_ADJUSTMENT: {DG_type: extra_adjustment, ...}
+        # ========================================
+        df_dg_rated_power = self.raw_data[InputDataName.DG_RATED_POWER_DF].copy()
+        self.data[DataName.LIST_DG_TYPE] = df_dg_rated_power[DgRatedPowerHeader.DG_TYPE].tolist()
+        self.data[DataName.DICT_DG_RATED_POWER] = df_dg_rated_power.set_index(
+            [DgRatedPowerHeader.DG_TYPE]
+        )[DgRatedPowerHeader.RATED_POWER].to_dict()
+        self.data[DataName.DICT_DG_UNIT_PRICE] = df_dg_rated_power.set_index(
+            [DgRatedPowerHeader.DG_TYPE]
+        )[DgRatedPowerHeader.UNIT_PRICE].to_dict()
+        self.data[DataName.DICT_DG_EXTRA_ADJUSTMENT] = df_dg_rated_power.set_index(
+            [DgRatedPowerHeader.DG_TYPE]
+        )[DgRatedPowerHeader.EXTRA_ADJUSTMENT].to_dict()
 
     def line_data(self):
         """

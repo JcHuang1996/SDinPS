@@ -14,6 +14,7 @@ from util.names import VarName
 
 
 def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
+    """Write or overwrite iter_general_info.csv from ite_obj_value_dict. Handles empty dict (header-only)."""
     general_records = []
     for ite_num in ite_obj_value_dict:
         incumbent = ite_obj_value_dict[ite_num].get('sub_obj(best_incumbent)', {}).get('sub_p_total', None)
@@ -30,11 +31,15 @@ def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
         record.update(detail_dict)
         general_records.append(record)
 
-    df_general = pd.DataFrame(general_records)
+    if not general_records:
+        df_general = pd.DataFrame(columns=['ite_num', 'best_incumbent_obj_value', 'best_bound_objective_value'])
+    else:
+        df_general = pd.DataFrame(general_records)
     csv_general_path = os.path.join(output_dir, 'iter_general_info.csv')
     df_general.to_csv(csv_general_path, index=False)
 
 def iter_sub_prob_info(ite_obj_value_dict=None, output_dir=None, scenario_list=None):
+    """Write or overwrite iter_subproblem_info.csv from ite_obj_value_dict. Handles empty dict (header-only)."""
     sub_records = []
     for ite_num in ite_obj_value_dict:
         for s in scenario_list:
@@ -46,7 +51,10 @@ def iter_sub_prob_info(ite_obj_value_dict=None, output_dir=None, scenario_list=N
             record['sub_obj_total'] = sub_total
             sub_records.append(record)
 
-    df_sub = pd.DataFrame(sub_records)
+    if not sub_records:
+        df_sub = pd.DataFrame(columns=['ite_num', 'scenario', 'sub_obj_total'])
+    else:
+        df_sub = pd.DataFrame(sub_records)
     csv_sub_path = os.path.join(output_dir, 'iter_subproblem_info.csv')
     df_sub.to_csv(csv_sub_path, index=False)
 
@@ -114,27 +122,15 @@ def write_power_usage_capacity_ratio(
 
 def write_decomp_run_parameters(
     output_dir: str,
-    scenario_list: List[Any],
-    data_set_name: str,
-    max_iterations: int,
-    benders_cut_iter_range: Optional[Tuple[int, int]],
-    strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
-    lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+    params: dict,
     file_name: str = "decomp_run_parameters.txt",
 ) -> str:
     """
-    Write a text file in output_dir recording the given run parameters, one per line.
+    Write a text file in output_dir with one line per key-value pair in params.
     Returns the path of the written file.
     """
     path = os.path.join(output_dir, file_name)
-    lines = [
-        f"scenario_list: {scenario_list}",
-        f"data_set_name: {data_set_name}",
-        f"max_iterations: {max_iterations}",
-        f"benders_cut_iter_range: {benders_cut_iter_range}",
-        f"strengthen_benders_cut_iter_range: {strengthen_benders_cut_iter_range}",
-        f"lagrangian_cut_iter_range: {lagrangian_cut_iter_range}",
-    ]
+    lines = [f"{k}: {v}" for k, v in params.items()]
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     return path

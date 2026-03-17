@@ -5,6 +5,7 @@
 
 import sys
 import os
+import json
 
 # Add project root to Python path when running directly
 if __name__ == "__main__":
@@ -12,8 +13,33 @@ if __name__ == "__main__":
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+import numpy as np
 import pandas as pd
 from unit_test.test_scripts.combined_formulation_test import run_combined_formulation_test
+
+
+def _to_json_serializable(obj):
+    """Convert nested dict/values to JSON-serializable form (e.g. numpy scalars -> float/int, tuple keys -> str)."""
+    if isinstance(obj, dict):
+        return {_json_key(k): _to_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_serializable(v) for v in obj]
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def _json_key(k):
+    """Convert dict key to JSON-allowed type (str, int, float, bool, None). Tuples become strings."""
+    if isinstance(k, tuple):
+        return str(k)
+    if isinstance(k, (str, int, float, bool)) or k is None:
+        return k
+    return str(k)
 
 
 def record_solution(
@@ -48,13 +74,25 @@ def record_solution(
         output_path=None,
         generate_plot=False  # Skip plotting for solution recording
     )
-    
+
+    m_result = m_combined.result
+
     # Get objective term values
     obj_term_value = m_combined.obj_term_value.copy()
-    
+
     # Prepare the new row data
     # Convert scenario_list to string representation for storage
     sce_str = str(scenario_list)
+
+    # Output result as JSON under dataset_path/solutions/, named by sce_str
+    solutions_dir = os.path.join(dataset_path, 'solutions')
+    os.makedirs(solutions_dir, exist_ok=True)
+    # Sanitize sce_str to a valid filename (e.g. "['s_1', 's_2']" -> "s_1_s_2.json")
+    filename_safe = sce_str.replace("'", "").replace("[", "").replace("]", "").replace(", ", "_").replace(" ", "_").strip() + ".json"
+    result_json_path = os.path.join(solutions_dir, filename_safe)
+    with open(result_json_path, 'w', encoding='utf-8') as f:
+        json.dump(_to_json_serializable(m_result), f, indent=2)
+    print(f'Saved result JSON to: {result_json_path}')
     
     # Create row data: 'sce' column + objective term columns
     new_row = {'sce': sce_str}
@@ -107,12 +145,17 @@ def record_solution(
 
 if __name__ == "__main__":
     # Example usage
-    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test_symm_broken'
-    # # scenario_list = ['s_6']
-    # # scenario_list = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6']
-    # scenario_list = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6', 's_7', 's_8', 's_9', 's_10']
-    # for s in scenario_list:
-    #     s_list = [s]
-    #     record_solution(dataset_path=dataset_path, scenario_list=s_list)
-
-    record_solution(dataset_path=dataset_path, scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'])
+    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test_fixed_rated_p'
+    s_list_list = [
+        ['s_1'],
+        ['s_2'],
+        ['s_3'],
+        ['s_4'],
+        ['s_5'],
+        ['s_6'],
+        ['s_1', 's_2', 's_3'],
+        ['s_1', 's_3', 's_5'],
+        ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
+    ]
+    for s_list in s_list_list:
+        record_solution(dataset_path=dataset_path, scenario_list=s_list)
