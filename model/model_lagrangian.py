@@ -166,78 +166,78 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
         return pyo.value(self.var[VarName.LIFT_VALUE])
 
 
-class ModelLagrangianCutDeterministic(ModelCombined):
-    """
-    Reference:
-    Rahmaniani, R., Ahmed, S., Crainic, T. G., Gendreau, M., & Rei, W. (2020).
-    The Benders Dual Decomposition Method. Operations Research, 68(3), 878–895.
-    https://doi-org.prox.lib.ncsu.edu/10.1287/opre.2019.1892
-
-    The model solve MINLP (8) in the reference paper for generating exact Lagrangian cut.
-    """
-    def __init__(self, model_name='default_m', model_data=None, main_result=None, constr_dual_info=None, constr_var_map=None):
-        super().__init__(model_name=model_name, model_data=model_data)
-
-        self.main_result = main_result
-
-        self.constr_dual_info = constr_dual_info
-        self.constr_var_map = constr_var_map
-
-    def build_model(self):
-        # add vars, the same as add_vars in model_combined
-        self.add_vars_basic_generator_bi()
-        self.add_vars_basic_generator_c()
-        self.add_vars_basic_line()
-        self.add_vars_line_connectivity()
-        self.add_vars_sys_operating()
-        self.add_vars_sys_topology()
-
-        # add constraints, the same as add_constraints in model_combine, except that DG_ub is removed
-        self.add_constr_DG_rated_power_ub()
-        self.add_constr_DG_operating()
-        self.add_constr_line_connectivity()
-        self.add_constr_system_operating()
-        self.add_constr_system_topology_constraints()
-
-        # add Lagrangian cut generation components: \eta, the constraint for describing eta, objective function
-        self.add_lagrangian_generating_components()
-
-    def add_lagrangian_generating_components(self):
-
-        self.var[VarName.LAG_ESTIMATOR] = self.add_var(domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}')
-
-        self.var[VarName.AR_VAR_OBJ] = self.add_var(domain=pyo.Reals, name=f'{VarName.AR_VAR_OBJ}')
-
-        constr_name_list = sorted(self.constr_dual_info.keys())
-        self.var[VarName.LAG_MULTIPLIER] = {
-            constr_name: self.add_var(
-                domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}_{constr_name}'
-            )
-            for constr_name in constr_name_list
-        }
-
-        self.add_constr(
-            self.var[VarName.AR_VAR_OBJ] == pyo.quicksum(
-                self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
-                for j in self.data[DataName.LIST_NODE]
-                for t in self.data[DataName.LIST_TIME]
-                for s in self.data[DataName.LIST_SCENARIO]
-            ) + pyo.quicksum(
-                self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
-                for j in self.data[DataName.LIST_NODE]
-                for t in self.data[DataName.LIST_TIME]
-                for s in self.data[DataName.LIST_SCENARIO]
-            ), name='ctx_record'
-        )
-
-        self.add_constr(
-            self.var[VarName.LAG_ESTIMATOR] <= self.var[VarName.AR_VAR_OBJ] - pyo.quicksum(
-                self.var[VarName.LAG_MULTIPLIER][constr_name]
-                * (self.var[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]]
-                   - self.main_result[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]])
-                for constr_name in constr_name_list
-            )
-        )
-
-        self.set_objective(self.var[VarName.LAG_ESTIMATOR], sense=pyo.maximize)
+# class ModelLagrangianCutDeterministic(ModelCombined):
+#     """
+#     Reference:
+#     Rahmaniani, R., Ahmed, S., Crainic, T. G., Gendreau, M., & Rei, W. (2020).
+#     The Benders Dual Decomposition Method. Operations Research, 68(3), 878–895.
+#     https://doi-org.prox.lib.ncsu.edu/10.1287/opre.2019.1892
+#
+#     The model solve MINLP (8) in the reference paper for generating exact Lagrangian cut.
+#     """
+#     def __init__(self, model_name='default_m', model_data=None, main_result=None, constr_dual_info=None, constr_var_map=None):
+#         super().__init__(model_name=model_name, model_data=model_data)
+#
+#         self.main_result = main_result
+#
+#         self.constr_dual_info = constr_dual_info
+#         self.constr_var_map = constr_var_map
+#
+#     def build_model(self):
+#         # add vars, the same as add_vars in model_combined
+#         self.add_vars_basic_generator_bi()
+#         self.add_vars_basic_generator_c()
+#         self.add_vars_basic_line()
+#         self.add_vars_line_connectivity()
+#         self.add_vars_sys_operating()
+#         self.add_vars_sys_topology()
+#
+#         # add constraints, the same as add_constraints in model_combine, except that DG_ub is removed
+#         self.add_constr_DG_rated_power_ub()
+#         self.add_constr_DG_operating()
+#         self.add_constr_line_connectivity()
+#         self.add_constr_system_operating()
+#         self.add_constr_system_topology_constraints()
+#
+#         # add Lagrangian cut generation components: \eta, the constraint for describing eta, objective function
+#         self.add_lagrangian_generating_components()
+#
+#     def add_lagrangian_generating_components(self):
+#
+#         self.var[VarName.LAG_ESTIMATOR] = self.add_var(domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}')
+#
+#         self.var[VarName.AR_VAR_OBJ] = self.add_var(domain=pyo.Reals, name=f'{VarName.AR_VAR_OBJ}')
+#
+#         constr_name_list = sorted(self.constr_dual_info.keys())
+#         self.var[VarName.LAG_MULTIPLIER] = {
+#             constr_name: self.add_var(
+#                 domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}_{constr_name}'
+#             )
+#             for constr_name in constr_name_list
+#         }
+#
+#         self.add_constr(
+#             self.var[VarName.AR_VAR_OBJ] == pyo.quicksum(
+#                 self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
+#                 for j in self.data[DataName.LIST_NODE]
+#                 for t in self.data[DataName.LIST_TIME]
+#                 for s in self.data[DataName.LIST_SCENARIO]
+#             ) + pyo.quicksum(
+#                 self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
+#                 for j in self.data[DataName.LIST_NODE]
+#                 for t in self.data[DataName.LIST_TIME]
+#                 for s in self.data[DataName.LIST_SCENARIO]
+#             ), name='ctx_record'
+#         )
+#
+#         self.add_constr(
+#             self.var[VarName.LAG_ESTIMATOR] <= self.var[VarName.AR_VAR_OBJ] - pyo.quicksum(
+#                 self.var[VarName.LAG_MULTIPLIER][constr_name]
+#                 * (self.var[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]]
+#                    - self.main_result[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]])
+#                 for constr_name in constr_name_list
+#             )
+#         )
+#
+#         self.set_objective(self.var[VarName.LAG_ESTIMATOR], sense=pyo.maximize)
 
