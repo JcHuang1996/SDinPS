@@ -8,7 +8,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from util.names import DataName, ObjName, VarName
 
 from dao.data_processor import DataProcessor
-from model import ModelMain, ModelSub, ModelCombined, ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, ModelLagrangianCutDeterministic
+from model import ModelMain, ModelSub, ModelCombined, ModelLagrangianMultiplierHeuristic, PSInnerMinimizationProblem
 from util.tools import iter_general_csv, iter_sub_prob_info
 
 import pyomo.environ as pyo
@@ -288,7 +288,7 @@ class TwoStageDecompRedo:
         dict_key = tuple(sub_model_sce_list)
         if dict_key not in self.inner_minimization_model_dict:
             sub_model_data = self.sub_model_data_dict[dict_key]
-            inner_model = ModelInnerMinimizationProblem(
+            inner_model = PSInnerMinimizationProblem(
                 model_name=f'{dict_key}_inm',
                 model_data=sub_model_data,
                 main_result=given_main_result,
@@ -355,8 +355,16 @@ class TwoStageDecompRedo:
             constr_var_map=constr_var_map,
         )
         curr_lag_multiplier = given_dual_info
+        constr_list = sorted(given_dual_info.keys())
+
+        best_L = cTx + sum(
+            curr_lag_multiplier[cn] * (
+                given_main_result[constr_var_map[cn][0]][constr_var_map[cn][1]]
+                - z[constr_var_map[cn][0]][constr_var_map[cn][1]]
+            )
+            for cn in constr_list
+        )
         potential_cTx, potential_z, potential_lambda = cTx, z.copy(), curr_lag_multiplier.copy()
-        prev_lift_value = 0
 
         lagrangian_multiplier_model = ModelLagrangianMultiplierHeuristic(
             model_name=f'{tuple(sub_model_sce_list)}_lmm',
@@ -371,10 +379,8 @@ class TwoStageDecompRedo:
             ini_stabilization_param=0.01,
         )
 
-        constr_list = sorted(given_dual_info.keys())
         for ite_num in range(1, max_ite_num + 1):
 
-            # obtain new lagrangian multiplier (dual multiplier)
             lagrangian_multiplier_model.add_constr_for_regularized_model(sub_obj_value=cTx, main_sol=z)
             lagrangian_multiplier_model.set_objective_function(
                 stabilization_param=0.01 / (1 + ite_num),
@@ -382,35 +388,35 @@ class TwoStageDecompRedo:
             )
             lagrangian_multiplier_model.solve()
 
-            # test if the new lagrangian multiplier could lift the cut
-            lift_value = lagrangian_multiplier_model.obtain_lift_value()
-
-            if lift_value - prev_lift_value <= 0.001 * math.fabs(prev_lift_value):
-                # if the new multiplier cannot lift the cut, then stop
-                # giving different feedback in log based on if the cut is improved based on the strengthen benders
-                if ite_num == 2:
-                    logger.info(f'Fail to generate better cut, lift:{lift_value}, prev:{prev_lift_value}')
-                else:
-                    logger.info(f'Improvement on generating Lagrangian cut, improve:{lift_value - prev_lift_value}')
-                break
-
-            prev_lift_value = lift_value
-
-            # otherwise, i.e.  the previous x, z, and dual multiplier lift the cut, then record these new result
-            # note that in the first iteration, the ctx, z, and lambda here form a strengthen benders
-            potential_cTx, potential_z, potential_lambda = cTx, z.copy(), curr_lag_multiplier.copy()
+            eta_ub = lagrangian_multiplier_model.obtain_lift_value()
 
             curr_lag_multiplier = lagrangian_multiplier_model.get_result(
                 var_name_list=[VarName.LAG_MULTIPLIER]
             )[VarName.LAG_MULTIPLIER]
 
-            # then generate new terms for obtaining new dual multiplier for a new trail
             lhs, rhs, cTx, z = self.gen_sce_strengthen_bds_cut(
                 sub_model_sce_list=sub_model_sce_list,
                 given_main_result=given_main_result,
                 given_dual_info=curr_lag_multiplier,
                 constr_var_map=constr_var_map,
             )
+
+            actual_L = cTx + sum(
+                curr_lag_multiplier[cn] * (
+                    given_main_result[constr_var_map[cn][0]][constr_var_map[cn][1]]
+                    - z[constr_var_map[cn][0]][constr_var_map[cn][1]]
+                )
+                for cn in constr_list
+            )
+
+            if actual_L > best_L + 1e-6:
+                best_L = actual_L
+                potential_cTx, potential_z, potential_lambda = cTx, z.copy(), curr_lag_multiplier.copy()
+                logger.info(f'Lagrangian cut improved: L={actual_L:.6f}, eta_ub={eta_ub:.6f}')
+
+            if eta_ub - best_L <= 0.001 * math.fabs(best_L):
+                logger.info(f'Lagrangian cut converged: best_L={best_L:.6f}, eta_ub={eta_ub:.6f}')
+                break
 
         lhs = pyo.quicksum(
             self.model_main.var[VarName.SUB_OBJ_EST][sub_sce] for sub_sce in sub_model_sce_list
@@ -423,47 +429,47 @@ class TwoStageDecompRedo:
         )
         return lhs, rhs, potential_cTx, potential_z
 
-    def gen_sub_sce_lag_cut_deterministic(
-            self,
-            sub_model_sce_list=None,
-            given_main_result=None,
-            given_dual_info=None,
-            constr_var_map=None,
-        ):
-
-        sub_model_data = self.data_processor_module.data_process(
-            scenario_list_assigned=sub_model_sce_list,
-            time_list_assigned=self.time_list
-        )
-        self.data_processor_module.clear_existing_data()
-
-        lagrangian_cut_model = ModelLagrangianCutDeterministic(
-            model_name=f'{tuple(sub_model_sce_list)}_lcdm',
-            model_data=sub_model_data,
-            main_result=given_main_result,
-            constr_dual_info=given_dual_info,
-            constr_var_map=constr_var_map,
-        )
-        lagrangian_cut_model.build_model()
-        lagrangian_cut_model.solve()
-
-        main_var_name_list = sorted(given_main_result.keys())
-        main_sol = lagrangian_cut_model.get_result(main_var_name_list)
-        sub_obj_value = lagrangian_cut_model.get_result([VarName.AR_VAR_OBJ])[VarName.AR_VAR_OBJ]
-        lag_multiplier = lagrangian_cut_model.get_result([VarName.LAG_MULTIPLIER])[VarName.LAG_MULTIPLIER]
-
-        constr_list = sorted(given_dual_info.keys())
-        lhs = pyo.quicksum(
-            self.model_main.var[VarName.SUB_OBJ_EST][sub_sce] for sub_sce in sub_model_sce_list
-        )
-        rhs = sub_obj_value + pyo.quicksum(
-            lag_multiplier[constr_name]
-            * (self.model_main.var[constr_var_map[constr_name][0]][constr_var_map[constr_name][1]]
-             - main_sol[constr_var_map[constr_name][0]][constr_var_map[constr_name][1]])
-            for constr_name in constr_list
-        )
-
-        return lhs, rhs, sub_obj_value, main_sol, lag_multiplier
+    # def gen_sub_sce_lag_cut_deterministic(
+    #         self,
+    #         sub_model_sce_list=None,
+    #         given_main_result=None,
+    #         given_dual_info=None,
+    #         constr_var_map=None,
+    #     ):
+    #
+    #     sub_model_data = self.data_processor_module.data_process(
+    #         scenario_list_assigned=sub_model_sce_list,
+    #         time_list_assigned=self.time_list
+    #     )
+    #     self.data_processor_module.clear_existing_data()
+    #
+    #     lagrangian_cut_model = ModelLagrangianCutDeterministic(
+    #         model_name=f'{tuple(sub_model_sce_list)}_lcdm',
+    #         model_data=sub_model_data,
+    #         main_result=given_main_result,
+    #         constr_dual_info=given_dual_info,
+    #         constr_var_map=constr_var_map,
+    #     )
+    #     lagrangian_cut_model.build_model()
+    #     lagrangian_cut_model.solve()
+    #
+    #     main_var_name_list = sorted(given_main_result.keys())
+    #     main_sol = lagrangian_cut_model.get_result(main_var_name_list)
+    #     sub_obj_value = lagrangian_cut_model.get_result([VarName.AR_VAR_OBJ])[VarName.AR_VAR_OBJ]
+    #     lag_multiplier = lagrangian_cut_model.get_result([VarName.LAG_MULTIPLIER])[VarName.LAG_MULTIPLIER]
+    #
+    #     constr_list = sorted(given_dual_info.keys())
+    #     lhs = pyo.quicksum(
+    #         self.model_main.var[VarName.SUB_OBJ_EST][sub_sce] for sub_sce in sub_model_sce_list
+    #     )
+    #     rhs = sub_obj_value + pyo.quicksum(
+    #         lag_multiplier[constr_name]
+    #         * (self.model_main.var[constr_var_map[constr_name][0]][constr_var_map[constr_name][1]]
+    #          - main_sol[constr_var_map[constr_name][0]][constr_var_map[constr_name][1]])
+    #         for constr_name in constr_list
+    #     )
+    #
+    #     return lhs, rhs, sub_obj_value, main_sol, lag_multiplier
 
     def add_benders_cut(
         self,

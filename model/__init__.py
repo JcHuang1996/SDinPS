@@ -7,6 +7,6 @@
 from .model_combined import ModelCombined
 from .model_main import ModelMain
 from .model_sub import ModelSub
-from .model_lagrangian import ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, ModelLagrangianCutDeterministic
+from .model_lagrangian import ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, PSInnerMinimizationProblem
 
-__all__ = ["ModelCombined", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "ModelLagrangianCutDeterministic"]
+__all__ = ["ModelCombined", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "PSInnerMinimizationProblem"]

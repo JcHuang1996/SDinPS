@@ -19,18 +19,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class ModelInnerMinimizationProblem(ModelCombined):
+class ModelInnerMinimizationProblem(ModelBase):
     """
+    General inner-minimization model for Lagrangian cut generation.
+
     Reference:
     Rahmaniani, R., Ahmed, S., Crainic, T. G., Gendreau, M., & Rei, W. (2020).
     The Benders Dual Decomposition Method. Operations Research, 68(3), 878–895.
     https://doi-org.prox.lib.ncsu.edu/10.1287/opre.2019.1892
 
-    The model solve MILP (9) in the reference paper for obtaining the first and second stage decisions, in order to
-    generate the Lagrangian cut.
+    Solves MILP (9): min_{x,y} c^T x - lambda^T (y - y*)
+    to obtain first/second-stage decisions for Lagrangian cut generation.
+
+    Subclass and override build_sub_vars_and_constraints() and get_sub_objective_expr(),
+    or pass build_fn / sub_obj_fn callables to the constructor.
     """
 
-    def __init__(self, model_name='default_m', model_data=None, main_result=None, constr_dual_info=None, constr_var_map=None):
+    def __init__(self, model_name='default_m', model_data=None, main_result=None,
+                 constr_dual_info=None, constr_var_map=None,
+                 build_fn=None, sub_obj_fn=None):
         super().__init__(model_name=model_name, model_data=model_data)
 
         self.main_result = main_result
@@ -38,37 +45,37 @@ class ModelInnerMinimizationProblem(ModelCombined):
         self.constr_dual_info = constr_dual_info
         self.constr_var_map = constr_var_map
 
+        self._build_fn = build_fn
+        self._sub_obj_fn = sub_obj_fn
+
     def build_model(self):
-        # add vars, the same as add_vars in model_combined
-        self.add_vars_basic_generator_bi()
-        self.add_vars_basic_generator_c()
-        self.add_vars_basic_line()
-        self.add_vars_line_connectivity()
-        self.add_vars_sys_operating()
-        self.add_vars_sys_topology()
-
-        # add constraints, the same as add_constraints in model_combine, except that DG_ub is removed
-        self.add_constr_DG_rated_power_ub()
-        self.add_constr_DG_operating()
-        self.add_constr_line_connectivity()
-        self.add_constr_system_operating()
-        self.add_constr_system_topology_constraints()
-
+        self.build_sub_vars_and_constraints()
         self.set_objective_function()
+
+    def build_sub_vars_and_constraints(self):
+        """Build all subproblem variables and constraints (including local copies of master vars).
+        Override in subclass or provide build_fn to constructor."""
+        if self._build_fn is not None:
+            self._build_fn(self)
+        else:
+            raise NotImplementedError(
+                "Subclass must implement build_sub_vars_and_constraints() "
+                "or pass build_fn to constructor."
+            )
+
+    def get_sub_objective_expr(self):
+        """Return the Pyomo expression for the sub-objective c^T x (without Lagrangian penalty).
+        Override in subclass or provide sub_obj_fn to constructor."""
+        if self._sub_obj_fn is not None:
+            return self._sub_obj_fn(self)
+        raise NotImplementedError(
+            "Subclass must implement get_sub_objective_expr() "
+            "or pass sub_obj_fn to constructor."
+        )
 
     def set_objective_function(self, lag_multiplier=None):
 
-        self.obj_term[ObjName.SUB_OBJ_FUNCTION] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
-        ) + pyo.quicksum(
-            self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
-        )
+        self.obj_term[ObjName.SUB_OBJ_FUNCTION] = self.get_sub_objective_expr()
 
         if lag_multiplier is None:
             considered_multiplier = self.constr_dual_info
@@ -86,6 +93,38 @@ class ModelInnerMinimizationProblem(ModelCombined):
         self.set_objective(
             self.obj_term[ObjName.SUB_OBJ_FUNCTION] - self.obj_term[ObjName.COMPLEMENTARY_SLACK],
             sense=pyo.minimize
+        )
+
+
+class PSInnerMinimizationProblem(ModelInnerMinimizationProblem, ModelCombined):
+    """Power-system-specific inner minimization for Lagrangian cut generation.
+    Backward-compatible replacement for the original ModelInnerMinimizationProblem."""
+
+    def build_sub_vars_and_constraints(self):
+        self.add_vars_basic_generator_bi()
+        self.add_vars_basic_generator_c()
+        self.add_vars_basic_line()
+        self.add_vars_line_connectivity()
+        self.add_vars_sys_operating()
+        self.add_vars_sys_topology()
+
+        self.add_constr_DG_rated_power_ub()
+        self.add_constr_DG_operating()
+        self.add_constr_line_connectivity()
+        self.add_constr_system_operating()
+        self.add_constr_system_topology_constraints()
+
+    def get_sub_objective_expr(self):
+        return pyo.quicksum(
+            self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+            for s in self.data[DataName.LIST_SCENARIO]
+        ) + pyo.quicksum(
+            self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+            for s in self.data[DataName.LIST_SCENARIO]
         )
 
 
@@ -113,7 +152,7 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
         self.ite_executed_num = 0
 
     def build_ini_model(self, ini_sub_obj_value, ini_main_sol, ini_multiplier, ini_stabilization_param):
-        """
+        r"""
         ini_sub_obj_value: the c^{T}*\bar{x}^{1}
         ini_main_sol: the \bar{z}^{1}
         Build the initial version of the Lagrangian multiplier obtaining model, with following steps:

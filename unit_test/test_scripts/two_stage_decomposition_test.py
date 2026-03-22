@@ -299,10 +299,10 @@ if __name__ == "__main__":
         test_file_path=None,
         data_set_name='function_test_fixed_rated_p',
         max_iterations=_max_iter,
-        output_label='test',
+        output_label='test_more_lag',
         benders_cut_iter_range=(0, _max_iter - 1),
         strengthen_benders_cut_iter_range=(0, _max_iter - 1),
-        lagrangian_cut_iter_range=None,
+        lagrangian_cut_iter_range=(_max_iter - 25, _max_iter),
         record_incumbent_every_k=4,
         use_aggregated_cuts=False
     )
