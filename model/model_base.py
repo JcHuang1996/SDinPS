@@ -12,6 +12,7 @@ import logging
 from typing import Optional, Any
 
 import pyomo.environ as pyo
+from pyomo.core.base.label import cpxlp_label_from_name
 from pyomo.opt import SolverFactory, TerminationCondition
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class ModelBase:
         # imperative-style container: incremental add like addConstr
         self.model._constr_list = pyo.ConstraintList()
         self._constr_name_map = {}
+        self.model._user_constr_name_by_idx = {}
 
         # var registry: locate the corresponding var in cloned/relaxed models
         self._var_counter = 0
@@ -91,6 +93,7 @@ class ModelBase:
         self.model._constr_list.add(expr)
         if name is not None:
             self._constr_name_map[name] = idx
+            self.model._user_constr_name_by_idx[idx] = name
         return self.model._constr_list[idx]
 
     def get_constr_idx_by_name(self, name):
@@ -103,6 +106,22 @@ class ModelBase:
     def get_constr_item_in_relax_by_name(self, name):
         constr_idx = self.get_constr_idx_by_name(name)
         return self.model_relax._constr_list[constr_idx]
+
+    def remove_constr_by_name(self, name):
+        constr_item = self.get_constr_item_by_name(name)
+        constr_item.deactivate()
+        return constr_item
+
+    def activate_constr_by_name(self, name):
+        constr_item = self.get_constr_item_by_name(name)
+        constr_item.activate()
+        return constr_item
+
+    def update_constr_by_name(self, name, expr):
+        constr_item = self.get_constr_item_by_name(name)
+        constr_item.set_value(expr)
+        constr_item.activate()
+        return constr_item
 
     def set_objective(self, expr, sense=pyo.minimize):
 
@@ -239,8 +258,32 @@ class ModelBase:
         for key, expr in self.obj_term.items():
             self.obj_term_value[key] = pyo.value(expr)
 
+    def _get_lp_label_name(self, obj):
+        if getattr(obj, 'ctype', None) is pyo.Constraint and obj.parent_component() is self.model._constr_list:
+            user_name = self.model._user_constr_name_by_idx.get(obj.index())
+            if user_name is not None:
+                return cpxlp_label_from_name(user_name)
+        return cpxlp_label_from_name(obj.getname(True))
+
+    def _validate_lp_constraint_labels(self):
+        sanitized_name_map = {}
+        for idx, raw_name in self.model._user_constr_name_by_idx.items():
+            constr_item = self.model._constr_list[idx]
+            if not constr_item.active:
+                continue
+
+            sanitized_name = cpxlp_label_from_name(raw_name)
+            existing_name = sanitized_name_map.get(sanitized_name)
+            if existing_name is not None and existing_name != raw_name:
+                raise ValueError(
+                    'Constraint names conflict after LP sanitization: '
+                    f'"{existing_name}" and "{raw_name}" both map to "{sanitized_name}".'
+                )
+            sanitized_name_map[sanitized_name] = raw_name
+
     def write_file(self, file_name):
-        self.model.write(file_name, io_options={'symbolic_solver_labels': True})
+        self._validate_lp_constraint_labels()
+        self.model.write(file_name, io_options={'labeler': self._get_lp_label_name})
 
     def fix_variable_value(self, var_fix_info):
 

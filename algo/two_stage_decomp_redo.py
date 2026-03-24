@@ -4,11 +4,19 @@
 # @Email    : jiachenghuang0601@gmail.com
 
 
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from util.names import DataName, ObjName, VarName
 
 from dao.data_processor import DataProcessor
-from model import ModelMain, ModelSub, ModelCombined, ModelLagrangianMultiplierHeuristic, PSInnerMinimizationProblem
+from model import ModelMain, ModelSub, ModelCombined, ModelLagrangianMultiplierHeuristic, PSInnerMinimizationProblem, ModelCGLP
+from algo.algo_simple_tools import (
+    CutRepetitionTracker,
+    build_cglp_lower_bound_row_from_alpha_eta,
+    build_cglp_lower_bound_row_from_multiplier_cut,
+    flatten_ordered_var_values,
+    normalize_affine_lower_bound_row,
+    split_main_model_var_keys_for_cglp,
+)
 from util.tools import iter_general_csv, iter_sub_prob_info
 
 import pyomo.environ as pyo
@@ -40,6 +48,17 @@ class TwoStageDecompRedo:
         # the dict for restoring inner minimization model
         self.inner_minimization_model_dict = {}
 
+        # persistent CGLP state per scenario group
+        self.cglp_model_dict = {}
+        self.cglp_lower_bound_row_dict = {}
+        self.cglp_exact_point_value_dict = {}
+        self.main_stage_structural_constr_name_list = []
+        self.cglp_x_var_key_list = []
+        self.cglp_z_var_key_list = []
+
+        # global cut repetition tracking over all added cuts
+        self.cut_repetition_tracker = CutRepetitionTracker()
+
     def build_main_stage_model(self):
 
         # process the data for main model
@@ -54,6 +73,9 @@ class TwoStageDecompRedo:
         # build the main model with processed main model data
         self.model_main = ModelMain(model_name='Main', model_data=self.main_model_data)
         self.model_main.build_main_model()
+
+        self.main_stage_structural_constr_name_list = list(self.model_main._constr_name_map.keys())
+        self.cglp_x_var_key_list, self.cglp_z_var_key_list = split_main_model_var_keys_for_cglp(self.model_main)
 
     def solve_main_stage_model(self):
         # solve the main model, and compute the obj terms
@@ -270,6 +292,114 @@ class TwoStageDecompRedo:
 
         return lhs, rhs
 
+    def _register_group_lower_bound_row(self, sub_sce_list: List, row: dict):
+        group_key = tuple(sub_sce_list)
+        self._ensure_group_lower_bound_rows(sub_sce_list=sub_sce_list)
+        self.cglp_lower_bound_row_dict[group_key].append(row)
+
+    def get_repetitive_cut_records(self) -> List[dict]:
+        return self.cut_repetition_tracker.get_repetitive_records()
+
+    def _ensure_group_lower_bound_rows(self, sub_sce_list: List):
+        group_key = tuple(sub_sce_list)
+        if group_key in self.cglp_lower_bound_row_dict:
+            return
+
+        self.cglp_lower_bound_row_dict[group_key] = [
+            normalize_affine_lower_bound_row(
+                cut_name=f'cglp_lb_0_{group_key}',
+                constant_term=0.0,
+                var_coef_dict={},
+            )
+        ]
+
+    def _register_exact_point_for_group(self, sub_sce_list: List, forward_sol: dict, exact_sub_obj_value: float):
+        group_key = tuple(sub_sce_list)
+        x_point = flatten_ordered_var_values(
+            var_value_dict=forward_sol,
+            ordered_var_keys=self.cglp_x_var_key_list,
+        )
+
+        if group_key not in self.cglp_exact_point_value_dict:
+            self.cglp_exact_point_value_dict[group_key] = {}
+
+        if x_point in self.cglp_exact_point_value_dict[group_key]:
+            return x_point
+
+        self.cglp_exact_point_value_dict[group_key][x_point] = float(exact_sub_obj_value)
+
+        if group_key in self.cglp_model_dict:
+            self.cglp_model_dict[group_key].update_with_exact_point(
+                x_point=x_point,
+                q_value=exact_sub_obj_value,
+            )
+
+        return x_point
+
+    def add_cglp_cut(
+        self,
+        sub_sce_list,
+        ite_name,
+        forward_sol,
+        exact_sub_obj_value,
+        cut_name_prefix: str = "cglp",
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+    ) -> Optional[Tuple[str, Any, Any, Dict, float]]:
+        group_key = tuple(sub_sce_list)
+        self._ensure_group_lower_bound_rows(sub_sce_list=sub_sce_list)
+
+        if group_key not in self.cglp_model_dict:
+            cglp_model = ModelCGLP(
+                main_model=self.model_main,
+                x_var_keys=self.cglp_x_var_key_list,
+                z_var_keys=self.cglp_z_var_key_list,
+                structural_constr_names=self.main_stage_structural_constr_name_list,
+                theta_keys=list(sub_sce_list),
+                lower_bound_rows=self.cglp_lower_bound_row_dict[group_key],
+                model_name=f'cglp_{group_key}',
+            )
+            cglp_model.build_model()
+            for x_point, q_value in self.cglp_exact_point_value_dict.get(group_key, {}).items():
+                cglp_model.update_with_exact_point(
+                    x_point=x_point,
+                    q_value=q_value,
+                )
+            self.cglp_model_dict[group_key] = cglp_model
+
+        cglp_model = self.cglp_model_dict[group_key]
+        cglp_model.sync_lower_bound_rows(self.cglp_lower_bound_row_dict[group_key])
+        theta_value = sum(
+            pyo.value(self.model_main.var[VarName.SUB_OBJ_EST][sce_idx])
+            for sce_idx in sub_sce_list
+        )
+
+        if theta_value + 1e-6 >= exact_sub_obj_value:
+            return None
+
+        alpha, eta, cglp_lhs, cglp_rhs = cglp_model.solve_and_build_group_cut(model_main=self.model_main)
+
+        cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
+        if should_add_cut is None or should_add_cut(cglp_lhs, cglp_rhs, cut_name):
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=cglp_lhs, cut_rhs=cglp_rhs)
+            cglp_row = build_cglp_lower_bound_row_from_alpha_eta(
+                cut_name=cut_name,
+                alpha=alpha,
+                eta=eta,
+            )
+            self._register_group_lower_bound_row(
+                sub_sce_list=sub_sce_list,
+                row=cglp_row
+            )
+            self.cut_repetition_tracker.record_by_row(
+                cut_type="cglp",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                row=cglp_row,
+                sub_sce_list=sub_sce_list,
+            )
+
+        return cut_name, cglp_lhs, cglp_rhs, alpha, eta
+
     def gen_sce_strengthen_bds_cut(self, sub_model_sce_list=None, given_main_result=None, given_dual_info=None, constr_var_map=None):
         """
         The function generates a strengthened Benders optimality cut for the given scenario(s) based on the given main result.
@@ -427,7 +557,7 @@ class TwoStageDecompRedo:
              - potential_z[constr_var_map[constr_name][0]][constr_var_map[constr_name][1]])
             for constr_name in constr_list
         )
-        return lhs, rhs, potential_cTx, potential_z
+        return lhs, rhs, potential_cTx, potential_z, potential_lambda
 
     # def gen_sub_sce_lag_cut_deterministic(
     #         self,
@@ -493,6 +623,24 @@ class TwoStageDecompRedo:
         )
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
         self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=bd_lhs, cut_rhs=bd_rhs)
+        bd_row = build_cglp_lower_bound_row_from_multiplier_cut(
+            cut_name=cut_name,
+            base_value=sub_obj_value,
+            multiplier_info=constr_dual_info,
+            constr_var_map=constr_var_map,
+            ref_point=forward_sol,
+        )
+        self._register_group_lower_bound_row(
+            sub_sce_list=sub_sce_list,
+            row=bd_row
+        )
+        self.cut_repetition_tracker.record_by_row(
+            cut_type="benders",
+            ite_name=ite_name,
+            cut_name=cut_name,
+            row=bd_row,
+            sub_sce_list=sub_sce_list,
+        )
         return cut_name, bd_lhs, bd_rhs
 
     def add_strengthen_benders_cut(
@@ -520,6 +668,24 @@ class TwoStageDecompRedo:
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
         if should_add_cut is None or should_add_cut(sbd_lhs, sbd_rhs, cut_name):
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=sbd_lhs, cut_rhs=sbd_rhs)
+            sbd_row = build_cglp_lower_bound_row_from_multiplier_cut(
+                cut_name=cut_name,
+                base_value=obtained_sub_obj,
+                multiplier_info=given_dual_info,
+                constr_var_map=constr_var_map,
+                ref_point=obtained_main_sol,
+            )
+            self._register_group_lower_bound_row(
+                sub_sce_list=sub_sce_list,
+                row=sbd_row
+            )
+            self.cut_repetition_tracker.record_by_row(
+                cut_type="strengthen_benders",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                row=sbd_row,
+                sub_sce_list=sub_sce_list,
+            )
         return cut_name, sbd_lhs, sbd_rhs, obtained_sub_obj, obtained_main_sol
 
     def add_lagrangian_cut(
@@ -539,7 +705,7 @@ class TwoStageDecompRedo:
         Otherwise the cut is always added. Returns (cut_name, lhs, rhs, sub_obj, main_sol)
         for possible comparison with other cuts in future functions.
         """
-        lg_lhs, lg_rhs, sub_obj, main_sol = self.gen_sub_sce_lag_cut_heuristic(
+        lg_lhs, lg_rhs, sub_obj, main_sol, lag_multiplier = self.gen_sub_sce_lag_cut_heuristic(
             sub_model_sce_list=sub_sce_list,
             given_main_result=given_main_result,
             given_dual_info=given_dual_info,
@@ -549,6 +715,24 @@ class TwoStageDecompRedo:
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
         if should_add_cut is None or should_add_cut(lg_lhs, lg_rhs, cut_name):
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lg_lhs, cut_rhs=lg_rhs)
+            lg_row = build_cglp_lower_bound_row_from_multiplier_cut(
+                cut_name=cut_name,
+                base_value=sub_obj,
+                multiplier_info=lag_multiplier,
+                constr_var_map=constr_var_map,
+                ref_point=main_sol,
+            )
+            self._register_group_lower_bound_row(
+                sub_sce_list=sub_sce_list,
+                row=lg_row
+            )
+            self.cut_repetition_tracker.record_by_row(
+                cut_type="lagrangian",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                row=lg_row,
+                sub_sce_list=sub_sce_list,
+            )
         return cut_name, lg_lhs, lg_rhs, sub_obj, main_sol
 
     def add_aggregated_cut(
@@ -572,6 +756,13 @@ class TwoStageDecompRedo:
         cut_name = f"{cut_name_prefix}_agg_{ite_name}"
         if should_add_cut is None or should_add_cut(agg_lhs, agg_rhs, cut_name):
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=agg_lhs, cut_rhs=agg_rhs)
+            self.cut_repetition_tracker.record_by_expr(
+                cut_type=f"{cut_name_prefix}_aggregated",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                expr=agg_lhs - agg_rhs,
+                sub_sce_list=None,
+            )
         return cut_name, agg_lhs, agg_rhs
 
     def _gather_one_group_cut_data(
@@ -582,9 +773,10 @@ class TwoStageDecompRedo:
         ite_name: str,
         add_strengthen: bool,
         add_lagrangian: bool,
+        add_cglp: bool,
         main_stage_obj: Optional[float] = None,
         incumbent_records: Optional[List] = None,
-    ) -> Tuple[float, Any, Any, Optional[Any], Optional[Any]]:
+    ) -> Tuple[float, Any, Any, Optional[Any], Optional[Any], Optional[float]]:
         """
         Build sub model for sub_sce_list, solve relaxed, optionally record incumbent, collect duals.
         If add_strengthen or add_lagrangian, also build/solve frac model and return frac duals.
@@ -600,8 +792,17 @@ class TwoStageDecompRedo:
         self.solve_relaxed_sub_model()
         sub_obj_value_for_benders = self.current_sub_model.get_relaxed_obj_value()
 
-        if incumbent_records is not None:
+        exact_sub_obj_value = None
+        if incumbent_records is not None or add_cglp:
             self.solve_sub_model()
+            exact_sub_obj_value = self.current_sub_model.get_obj_value()
+            self._register_exact_point_for_group(
+                sub_sce_list=sub_sce_list,
+                forward_sol=curr_main_result,
+                exact_sub_obj_value=exact_sub_obj_value,
+            )
+
+        if incumbent_records is not None:
             sub_obj_w_main, _ = self.record_sub_model(
                 main_stage_obj_value=main_stage_obj,
                 ite_name=ite_name,
@@ -632,6 +833,7 @@ class TwoStageDecompRedo:
             constr_var_map_bi,
             constr_dual_frac,
             constr_var_map_frac,
+            exact_sub_obj_value,
         )
 
     def run_iteration_cuts_per_scenario(
@@ -644,6 +846,7 @@ class TwoStageDecompRedo:
         benders_cut_iter_range: Optional[Tuple[int, int]],
         strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
         lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+        cglp_cut_iter_range: Optional[Tuple[int, int]],
         *,
         main_stage_obj: Optional[float] = None,
         incumbent_records: Optional[List] = None,
@@ -665,6 +868,10 @@ class TwoStageDecompRedo:
             lagrangian_cut_iter_range is not None
             and lagrangian_cut_iter_range[0] <= ite_num <= lagrangian_cut_iter_range[1]
         )
+        add_cglp = (
+            cglp_cut_iter_range is not None
+            and cglp_cut_iter_range[0] <= ite_num <= cglp_cut_iter_range[1]
+        )
 
         for sub_sce_list in sce_group_list:
             (
@@ -673,6 +880,7 @@ class TwoStageDecompRedo:
                 constr_var_map_bi,
                 constr_dual_frac,
                 constr_var_map_frac,
+                exact_sub_obj_value,
             ) = self._gather_one_group_cut_data(
                 sub_sce_list=sub_sce_list,
                 curr_main_result=curr_main_result,
@@ -680,6 +888,7 @@ class TwoStageDecompRedo:
                 ite_name=ite_name,
                 add_strengthen=add_strengthen,
                 add_lagrangian=add_lagrangian,
+                add_cglp=add_cglp,
                 main_stage_obj=main_stage_obj,
                 incumbent_records=incumbent_records,
             )
@@ -713,6 +922,89 @@ class TwoStageDecompRedo:
                     max_ite_num=max_lagrangian_ite,
                 )
 
+            if add_cglp and exact_sub_obj_value is not None:
+                self.add_cglp_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    forward_sol=curr_main_result,
+                    exact_sub_obj_value=exact_sub_obj_value,
+                )
+
+    def run_iteration_cuts_for_given_main_result(
+        self,
+        sce_group_list: List[List],
+        ite_name: str,
+        given_main_result: Any,
+        add_benders: bool,
+        add_strengthen: bool,
+        add_lagrangian: bool,
+        add_cglp: bool,
+        *,
+        main_stage_obj: Optional[float] = None,
+        incumbent_records: Optional[List] = None,
+        max_lagrangian_ite: int = 10,
+    ) -> None:
+        """
+        For each scenario group in sce_group_list: gather cut data using the provided main solution
+        as both integer and fractional main result, then add the requested cuts per group.
+        """
+        for sub_sce_list in sce_group_list:
+            (
+                sub_obj_value_for_benders,
+                constr_dual_bi,
+                constr_var_map_bi,
+                constr_dual_frac,
+                constr_var_map_frac,
+                exact_sub_obj_value,
+            ) = self._gather_one_group_cut_data(
+                sub_sce_list=sub_sce_list,
+                curr_main_result=given_main_result,
+                frac_main_result=given_main_result,
+                ite_name=ite_name,
+                add_strengthen=add_strengthen,
+                add_lagrangian=add_lagrangian,
+                add_cglp=add_cglp,
+                main_stage_obj=main_stage_obj,
+                incumbent_records=incumbent_records,
+            )
+
+            if add_benders:
+                self.add_benders_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    sub_obj_value=sub_obj_value_for_benders,
+                    constr_dual_info=constr_dual_bi,
+                    constr_var_map=constr_var_map_bi,
+                    forward_sol=given_main_result,
+                )
+
+            if add_strengthen and constr_dual_frac is not None:
+                self.add_strengthen_benders_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    given_main_result=given_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                )
+
+            if add_lagrangian and constr_dual_frac is not None:
+                self.add_lagrangian_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    given_main_result=given_main_result,
+                    given_dual_info=constr_dual_frac,
+                    constr_var_map=constr_var_map_frac,
+                    max_ite_num=max_lagrangian_ite,
+                )
+
+            if add_cglp and exact_sub_obj_value is not None:
+                self.add_cglp_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    forward_sol=given_main_result,
+                    exact_sub_obj_value=exact_sub_obj_value,
+                )
+
     def run_iteration_cuts_aggregated(
         self,
         sce_group_list: List[List],
@@ -723,6 +1015,7 @@ class TwoStageDecompRedo:
         benders_cut_iter_range: Optional[Tuple[int, int]],
         strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
         lagrangian_cut_iter_range: Optional[Tuple[int, int]],
+        cglp_cut_iter_range: Optional[Tuple[int, int]] = None,
         *,
         main_stage_obj: Optional[float] = None,
         incumbent_records: Optional[List] = None,
@@ -732,6 +1025,9 @@ class TwoStageDecompRedo:
         For each scenario group: gather cut data and collect (lhs, rhs, weight). After the loop, add
         exactly one cut per type using probability-weighted lhs and rhs. Corresponds to use_aggregated_cuts=True.
         """
+        if cglp_cut_iter_range is not None:
+            raise NotImplementedError("CGLP cuts are only implemented for run_iteration_cuts_per_scenario().")
+
         add_benders = (
             benders_cut_iter_range is not None
             and benders_cut_iter_range[0] <= ite_num <= benders_cut_iter_range[1]
@@ -756,6 +1052,7 @@ class TwoStageDecompRedo:
                 constr_var_map_bi,
                 constr_dual_frac,
                 constr_var_map_frac,
+                _,
             ) = self._gather_one_group_cut_data(
                 sub_sce_list=sub_sce_list,
                 curr_main_result=curr_main_result,
@@ -763,6 +1060,7 @@ class TwoStageDecompRedo:
                 ite_name=ite_name,
                 add_strengthen=add_strengthen,
                 add_lagrangian=add_lagrangian,
+                add_cglp=False,
                 main_stage_obj=main_stage_obj,
                 incumbent_records=incumbent_records,
             )
@@ -788,7 +1086,7 @@ class TwoStageDecompRedo:
                 strengthen_terms.append((sbd_lhs, sbd_rhs, weight))
 
             if add_lagrangian and constr_dual_frac is not None:
-                lg_lhs, lg_rhs, _, _ = self.gen_sub_sce_lag_cut_heuristic(
+                lg_lhs, lg_rhs, _, _, _ = self.gen_sub_sce_lag_cut_heuristic(
                     sub_model_sce_list=sub_sce_list,
                     given_main_result=frac_main_result,
                     given_dual_info=constr_dual_frac,

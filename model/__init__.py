@@ -5,8 +5,9 @@
 
 
 from .model_combined import ModelCombined
+from .model_cglp import ModelCGLP
 from .model_main import ModelMain
 from .model_sub import ModelSub
 from .model_lagrangian import ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, PSInnerMinimizationProblem
 
-__all__ = ["ModelCombined", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "PSInnerMinimizationProblem"]
+__all__ = ["ModelCombined", "ModelCGLP", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "PSInnerMinimizationProblem"]

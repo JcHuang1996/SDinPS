@@ -8,7 +8,7 @@ import os
 import sys
 
 from algo.two_stage_decomp_redo import TwoStageDecompRedo
-from algo.algo_simple_tools import analyze_scenario_solutions
+from algo.algo_simple_tools import analyze_scenario_solutions, detect_and_record_repetition
 
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -21,7 +21,12 @@ from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
 
-from util.tools import write_decomp_run_parameters, write_power_usage_capacity_ratio
+from util.tools import (
+    report_repetitive_cuts,
+    write_decomp_run_parameters,
+    write_main_result_repetition_report,
+    write_power_usage_capacity_ratio,
+)
 
 from datetime import datetime
 import copy
@@ -57,6 +62,7 @@ def run_decomp_module_test(
     benders_cut_iter_range: Optional[Tuple[int, int]] = None,
     strengthen_benders_cut_iter_range: Optional[Tuple[int, int]] = None,
     lagrangian_cut_iter_range: Optional[Tuple[int, int]] = None,
+    cglp_cut_iter_range: Optional[Tuple[int, int]] = None,
     record_incumbent_every_k: Optional[int] = None,
     use_aggregated_cuts: bool = False,
 ):
@@ -74,6 +80,7 @@ def run_decomp_module_test(
         benders_cut_iter_range: (first_iter, last_iter) to add Benders cuts; None to skip.
         strengthen_benders_cut_iter_range: (first_iter, last_iter) to add strengthened Benders cuts; None to skip.
         lagrangian_cut_iter_range: (first_iter, last_iter) to add Lagrangian cuts; None to skip.
+        cglp_cut_iter_range: (first_iter, last_iter) to add CGLP cuts; None to skip.
         record_incumbent_every_k: If a positive integer k, record incumbent and run convergence check only every k
             iterations (0, k, 2k, ...). If None, record every iteration. When not recording, solve_sub_model() is
             skipped and Benders cut uses relaxed LP objective (get_relaxed_obj_value()); strengthen/Lagrangian
@@ -111,12 +118,15 @@ def run_decomp_module_test(
         ("benders_cut_iter_range", benders_cut_iter_range),
         ("strengthen_benders_cut_iter_range", strengthen_benders_cut_iter_range),
         ("lagrangian_cut_iter_range", lagrangian_cut_iter_range),
+        ("cglp_cut_iter_range", cglp_cut_iter_range),
     ]:
         if val is not None:
             _check_iter_range(name, val, max_iterations)
 
     if record_incumbent_every_k is not None and (not isinstance(record_incumbent_every_k, int) or record_incumbent_every_k < 1):
         raise ValueError("record_incumbent_every_k must be a positive integer or None")
+    if use_aggregated_cuts and cglp_cut_iter_range is not None:
+        raise NotImplementedError("CGLP cuts are only wired for use_aggregated_cuts=False.")
 
     init_logger(enable_file_output=enable_log_output)
 
@@ -171,7 +181,12 @@ def run_decomp_module_test(
 
     best_obj = float('inf')
     best_sub_results = None  # best-iteration sub results: {VarName.DG_ACTIVE_POWER: {(j,t,s): v}, VarName.DG_RATED_POWER: {(j,s): v}}
-
+    curr_main_result_history = []
+    frac_main_result_history = []
+    curr_main_repetition_records = []
+    frac_main_repetition_records = []
+    curr_main_seen_signatures = {}
+    frac_main_seen_signatures = {}
     if enable_result_output:
         two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
 
@@ -200,6 +215,31 @@ def run_decomp_module_test(
         two_stage_decomp_module.solve_main_stage_relaxed_model()
         frac_main_result = two_stage_decomp_module.model_main.get_result_relaxed([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
 
+        curr_is_repeated, curr_first_seen_ite = detect_and_record_repetition(
+            value=curr_main_result,
+            seen_signatures=curr_main_seen_signatures,
+            iteration=ite_num,
+            tol=1e-6,
+        )
+        curr_main_repetition_records.append({
+            "iteration": ite_num,
+            "is_repeated": curr_is_repeated,
+            "first_seen_iteration": curr_first_seen_ite,
+        })
+        frac_is_repeated, frac_first_seen_ite = detect_and_record_repetition(
+            value=frac_main_result,
+            seen_signatures=frac_main_seen_signatures,
+            iteration=ite_num,
+            tol=1e-6,
+        )
+        frac_main_repetition_records.append({
+            "iteration": ite_num,
+            "is_repeated": frac_is_repeated,
+            "first_seen_iteration": frac_first_seen_ite,
+        })
+        curr_main_result_history.append(copy.deepcopy(curr_main_result))
+        frac_main_result_history.append(copy.deepcopy(frac_main_result))
+
         sce_prob = two_stage_decomp_module.sce_prob_dict
         incumbent_records = [] if do_record_incumbent else None
 
@@ -213,6 +253,7 @@ def run_decomp_module_test(
                 benders_cut_iter_range=benders_cut_iter_range,
                 strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
                 lagrangian_cut_iter_range=lagrangian_cut_iter_range,
+                cglp_cut_iter_range=cglp_cut_iter_range,
                 main_stage_obj=main_stage_obj if do_record_incumbent else None,
                 incumbent_records=incumbent_records,
                 max_lagrangian_ite=10,
@@ -227,6 +268,7 @@ def run_decomp_module_test(
                 benders_cut_iter_range=benders_cut_iter_range,
                 strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
                 lagrangian_cut_iter_range=lagrangian_cut_iter_range,
+                cglp_cut_iter_range=cglp_cut_iter_range,
                 main_stage_obj=main_stage_obj if do_record_incumbent else None,
                 incumbent_records=incumbent_records,
                 max_lagrangian_ite=10,
@@ -266,6 +308,7 @@ def run_decomp_module_test(
             "benders_cut_iter_range": benders_cut_iter_range,
             "strengthen_benders_cut_iter_range": strengthen_benders_cut_iter_range,
             "lagrangian_cut_iter_range": lagrangian_cut_iter_range,
+            "cglp_cut_iter_range": cglp_cut_iter_range,
             "record_incumbent_every_k": record_incumbent_every_k,
             "use_aggregated_cuts": use_aggregated_cuts,
         },
@@ -277,32 +320,52 @@ def run_decomp_module_test(
             output_dir=output_dir,
         )
 
+    repetitive_cut_records = two_stage_decomp_module.get_repetitive_cut_records()
+    report_repetitive_cuts(
+        repetitive_cut_records=repetitive_cut_records,
+        enable_result_output=enable_result_output,
+        output_dir=output_dir,
+        logger=logger,
+    )
+    if enable_result_output:
+        write_main_result_repetition_report(
+            output_dir=output_dir,
+            curr_main_result_history=curr_main_result_history,
+            frac_main_result_history=frac_main_result_history,
+            curr_main_repetition_records=curr_main_repetition_records,
+            frac_main_repetition_records=frac_main_repetition_records,
+        )
+
     # after finishing the algorithm
     plot_iter_obj_curves(
         ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
         output_dir=output_dir,
         real_objective_value=3239346
     )
+    return {
+        "repetitive_cut_count": len(repetitive_cut_records),
+        "repetitive_cut_records": repetitive_cut_records,
+    }
 
 
 
 if __name__ == "__main__":
-    _max_iter = 150
+    _max_iter = 200
     run_decomp_module_test(
         enable_log_output=False,
         enable_result_output=True,
         # scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
         scenario_list=['s_1', 's_3', 's_5'],
-        # scenario_list=['s_1', 's_2', 's_3'],
         time_list=None,
         test_read_method=None,
         test_file_path=None,
         data_set_name='function_test_fixed_rated_p',
         max_iterations=_max_iter,
-        output_label='test_more_lag',
+        output_label='test_all_cut_long',
         benders_cut_iter_range=(0, _max_iter - 1),
         strengthen_benders_cut_iter_range=(0, _max_iter - 1),
-        lagrangian_cut_iter_range=(_max_iter - 25, _max_iter),
+        lagrangian_cut_iter_range=(_max_iter - 75, _max_iter - 1),
+        cglp_cut_iter_range=(_max_iter - 75, _max_iter - 1),
         record_incumbent_every_k=4,
-        use_aggregated_cuts=False
+        use_aggregated_cuts=False,
     )

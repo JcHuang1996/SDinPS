@@ -7,11 +7,12 @@ import ast
 import json
 import logging
 import os
-from typing import Tuple, Optional
+from typing import Dict, List, Sequence, Tuple, Optional, Any
 
 import pandas as pd
 from pyomo.repn.standard_repn import generate_standard_repn
 import pyomo.environ as pyo
+from util.names import VarName
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,151 @@ DEFAULT_RHS_COMPARE_TOL = 1e-9
 
 # Name used in comparison output for the constant term
 CONSTANT_TERM_LABEL = 'constant term'
+
+# Default tolerance for cut-signature quantization.
+DEFAULT_CUT_SIGNATURE_TOL = 1e-8
+
+
+def _canonicalize_nested_obj(obj: Any):
+    """Convert nested structures to a deterministic, hashable representation."""
+    if isinstance(obj, dict):
+        items = [(_canonicalize_nested_obj(k), _canonicalize_nested_obj(v)) for k, v in obj.items()]
+        return ("dict", tuple(sorted(items, key=lambda x: repr(x[0]))))
+    if isinstance(obj, (list, tuple)):
+        return ("seq", tuple(_canonicalize_nested_obj(v) for v in obj))
+    if isinstance(obj, set):
+        vals = [_canonicalize_nested_obj(v) for v in obj]
+        return ("set", tuple(sorted(vals, key=repr)))
+    return ("atom", obj)
+
+
+def _quantize_float_for_signature(val: float, tol: float = DEFAULT_CUT_SIGNATURE_TOL) -> float:
+    if tol <= 0:
+        return float(val)
+    return round(float(val) / tol) * tol
+
+
+def _quantize_obj_for_signature(obj: Any, tol: float = DEFAULT_CUT_SIGNATURE_TOL):
+    if isinstance(obj, dict):
+        return {k: _quantize_obj_for_signature(v, tol=tol) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_quantize_obj_for_signature(v, tol=tol) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_quantize_obj_for_signature(v, tol=tol) for v in obj)
+    if isinstance(obj, float):
+        return _quantize_float_for_signature(obj, tol=tol)
+    return obj
+
+
+def build_cut_signature_from_row(cut_type: str, row: dict, tol: float = DEFAULT_CUT_SIGNATURE_TOL):
+    """
+    Build a deterministic signature for a cut row independent of cut name.
+    """
+    payload = {
+        "cut_type": cut_type,
+        "x_coef": row.get("x_coef", {}),
+        "rhs": float(row.get("rhs", 0.0)),
+    }
+    return _canonicalize_nested_obj(_quantize_obj_for_signature(payload, tol=tol))
+
+
+def build_linear_expr_signature(expr, cut_type: str, tol: float = DEFAULT_CUT_SIGNATURE_TOL):
+    """
+    Build a deterministic signature for a linear Pyomo expression.
+    Returns None when the expression is not linear / parseable.
+    """
+    const, var_coef = _parse_rhs_to_constant_and_linear(expr)
+    if const is None and var_coef is None:
+        return None
+    payload = {
+        "cut_type": cut_type,
+        "constant": float(const),
+        "var_coef": var_coef,
+    }
+    return _canonicalize_nested_obj(_quantize_obj_for_signature(payload, tol=tol))
+
+
+class CutRepetitionTracker:
+    """Track repeated cuts across iterations using deterministic signatures."""
+
+    def __init__(self):
+        self.seen_signatures = {}
+        self.records = []
+
+    @staticmethod
+    def _normalize_iteration_label(ite_name):
+        if isinstance(ite_name, int):
+            return ite_name
+        try:
+            return int(ite_name)
+        except (TypeError, ValueError):
+            return ite_name
+
+    def _record(self, signature, cut_type: str, ite_name, cut_name: str, sub_sce_list: Optional[List] = None) -> dict:
+        current_iteration = self._normalize_iteration_label(ite_name)
+        first_record = self.seen_signatures.get(signature)
+        is_repeated = first_record is not None
+        record = {
+            "cut_type": cut_type,
+            "cut_name": cut_name,
+            "iteration": current_iteration,
+            "scenario_group": list(sub_sce_list) if sub_sce_list is not None else None,
+            "is_repeated": is_repeated,
+            "first_seen_iteration": first_record["iteration"] if is_repeated else None,
+            "first_seen_cut_name": first_record["cut_name"] if is_repeated else None,
+        }
+        self.records.append(record)
+        if not is_repeated:
+            self.seen_signatures[signature] = {
+                "iteration": current_iteration,
+                "cut_name": cut_name,
+            }
+        return record
+
+    def record_by_row(self, cut_type: str, ite_name, cut_name: str, row: dict, sub_sce_list: Optional[List] = None) -> dict:
+        return self._record(
+            signature=build_cut_signature_from_row(cut_type=cut_type, row=row),
+            cut_type=cut_type,
+            ite_name=ite_name,
+            cut_name=cut_name,
+            sub_sce_list=sub_sce_list,
+        )
+
+    def record_by_expr(self, cut_type: str, ite_name, cut_name: str, expr, sub_sce_list: Optional[List] = None) -> dict:
+        signature = build_linear_expr_signature(expr=expr, cut_type=cut_type)
+        if signature is None:
+            signature = ("fallback", cut_type, str(expr))
+        return self._record(
+            signature=signature,
+            cut_type=cut_type,
+            ite_name=ite_name,
+            cut_name=cut_name,
+            sub_sce_list=sub_sce_list,
+        )
+
+    def get_repetitive_records(self) -> List[dict]:
+        return [record for record in self.records if record.get("is_repeated")]
+
+
+def detect_and_record_repetition(
+    value: Any,
+    seen_signatures: Dict[Any, int],
+    iteration: int,
+    tol: Optional[float] = None,
+) -> Tuple[bool, Optional[int]]:
+    """
+    Detect repetition online (during an iteration) and update seen_signatures.
+
+    Returns:
+        is_repeated: True if value has appeared before.
+        first_seen_iteration: The first iteration index where it appeared, or None for first occurrence.
+    """
+    signature_obj = _quantize_obj_for_signature(value, tol=tol) if tol is not None else value
+    signature = _canonicalize_nested_obj(signature_obj)
+    if signature in seen_signatures:
+        return True, seen_signatures[signature]
+    seen_signatures[signature] = iteration
+    return False, None
 
 
 def _parse_rhs_to_constant_and_linear(rhs_expr):
@@ -127,6 +273,138 @@ def compare_rhs(
         print(msg)
 
     return is_same, max_abs_diff, max_diff_location
+
+
+def flatten_ordered_var_values(var_value_dict: dict, ordered_var_keys: Sequence[Tuple[str, object]]) -> Tuple[int, ...]:
+    return tuple(
+        int(var_value_dict[var_name][var_key])
+        for var_name, var_key in ordered_var_keys
+    )
+
+
+def split_main_model_var_keys_for_cglp(main_model) -> Tuple[List[Tuple[str, object]], List[Tuple[str, object]]]:
+    x_var_key_list, z_var_key_list = [], []
+
+    for var_name in sorted(main_model.var.keys()):
+        if var_name == VarName.SUB_OBJ_EST:
+            continue
+
+        var_key_list = sorted(main_model.var[var_name].keys())
+        if not var_key_list:
+            continue
+
+        first_var = main_model.var[var_name][var_key_list[0]]
+        target_list = x_var_key_list if first_var.is_binary() else z_var_key_list
+        target_list.extend((var_name, var_key) for var_key in var_key_list)
+
+    return x_var_key_list, z_var_key_list
+
+
+def get_prefix_tuple(binary_point: Sequence[int], prefix_len: int) -> Tuple[int, ...]:
+    return tuple(binary_point[:prefix_len])
+
+
+def flip_prefix_tail(prefix_tuple: Sequence[int]) -> Tuple[int, ...]:
+    prefix_list = list(prefix_tuple)
+    prefix_list[-1] = 1 - int(prefix_list[-1])
+    return tuple(prefix_list)
+
+
+def prefix_to_w_vector(prefix_tuple: Sequence[int], total_dim: int) -> Tuple[int, ...]:
+    prefix = tuple(prefix_tuple)
+    return prefix + (0,) * (total_dim - len(prefix))
+
+
+def flatten_nested_var_coef_dict(var_coef_dict: dict) -> Dict[Tuple[str, object], float]:
+    return {
+        (var_name, var_key): float(coef)
+        for var_name in sorted(var_coef_dict.keys())
+        for var_key, coef in var_coef_dict[var_name].items()
+    }
+
+
+def normalize_affine_lower_bound_row(cut_name: str, constant_term: float, var_coef_dict: dict) -> dict:
+    """
+    Normalize theta >= constant_term + sum(coef * x) into row form a x - theta <= b.
+    """
+    return {
+        'name': cut_name,
+        'x_coef': flatten_nested_var_coef_dict(var_coef_dict),
+        'rhs': -float(constant_term),
+    }
+
+
+def normalize_cglp_lower_bound_row(row: dict, x_var_keys: Sequence[Tuple[str, object]]) -> dict:
+    """Convert a lower-bound cut into the dense row format expected by ModelCGLP."""
+    x_coef = row.get('x_coef', {})
+    if x_coef and isinstance(next(iter(x_coef.values())), dict):
+        x_coef = flatten_nested_var_coef_dict(x_coef)
+
+    return {
+        'name': row['name'],
+        'x_coef': {
+            x_key: float(x_coef.get(x_key, 0.0))
+            for x_key in x_var_keys
+        },
+        'rhs': float(row['rhs']),
+    }
+
+
+def flat_to_nested_coef_dict(flat_coef_dict: Dict[Tuple[str, object], float]) -> dict:
+    nested_coef_dict = {}
+    for (var_name, var_key), coef_value in flat_coef_dict.items():
+        if var_name not in nested_coef_dict:
+            nested_coef_dict[var_name] = {}
+        nested_coef_dict[var_name][var_key] = float(coef_value)
+    return nested_coef_dict
+
+
+def get_affine_constant_from_point_and_coef(base_value: float, var_coef_dict: dict, ref_point: dict) -> float:
+    return float(base_value) - sum(
+        float(var_coef_dict[var_name][var_key]) * float(ref_point[var_name][var_key])
+        for var_name in sorted(var_coef_dict.keys())
+        for var_key in sorted(var_coef_dict[var_name].keys())
+    )
+
+
+def build_cglp_lower_bound_row_from_alpha_eta(cut_name: str, alpha: Dict[Tuple[str, object], float], eta: float) -> dict:
+    return normalize_affine_lower_bound_row(
+        cut_name=cut_name,
+        constant_term=-float(eta),
+        var_coef_dict=flat_to_nested_coef_dict(
+            {
+                var_key: -float(alpha[var_key])
+                for var_key in alpha
+            }
+        ),
+    )
+
+
+def build_cglp_lower_bound_row_from_multiplier_cut(
+    cut_name: str,
+    base_value: float,
+    multiplier_info: dict,
+    constr_var_map: dict,
+    ref_point: dict,
+) -> dict:
+    var_coef_dict = {}
+    for constr_name in sorted(multiplier_info.keys()):
+        var_name, var_key = constr_var_map[constr_name]
+        if var_name not in var_coef_dict:
+            var_coef_dict[var_name] = {}
+        if var_key not in var_coef_dict[var_name]:
+            var_coef_dict[var_name][var_key] = 0.0
+        var_coef_dict[var_name][var_key] += float(multiplier_info[constr_name])
+
+    return normalize_affine_lower_bound_row(
+        cut_name=cut_name,
+        constant_term=get_affine_constant_from_point_and_coef(
+            base_value=base_value,
+            var_coef_dict=var_coef_dict,
+            ref_point=ref_point,
+        ),
+        var_coef_dict=var_coef_dict,
+    )
 
 
 # the function to divide and record the var names and var keys by their binary values
