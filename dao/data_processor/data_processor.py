@@ -26,6 +26,9 @@ class DataProcessor:
         # the processed data, ready to be used in later model
         self.data = {}
 
+        # method used to collapse t,s-dependent data for the enriched main problem
+        self.main_problem_hat_data_method = MainProblemHatDataMethodName.WEIGHTED_AVERAGE
+
     def clear_existing_data(self):
 
         # clear the processed data to generate a new data set
@@ -62,6 +65,7 @@ class DataProcessor:
             self.scenario_data()
 
         self.logic_process_data()
+        self.generate_main_problem_hat_data()
 
         logger.info(f'Data processing completed.')
 
@@ -365,11 +369,71 @@ class DataProcessor:
         # self.data[DataName.NUM_TOTAL_POWER] = df_node[NodeHeader.P_LOAD].sum()
         self.data[DataName.NUM_TOTAL_POWER] = 1.5
 
-        # ====================
-        # compute NUM_RATED_POWER_UB, the big-M for DG operation constraints
-        # value: TBD
-        # ====================
-        self.data[DataName.NUM_RATED_POWER_UB] = 1.75
+        # # ====================
+        # # compute NUM_RATED_POWER_UB, the big-M for DG operation constraints
+        # # value: TBD
+        # # ====================
+        # self.data[DataName.NUM_RATED_POWER_UB] = 1.75
+
+    def generate_main_problem_hat_data(self):
+        """
+        Generate collapsed data for the enriched main problem by removing the time / scenario dimensions.
+        """
+
+        prob_dict = self.data[DataName.DICT_SC_PROB]
+        time_list = self.data[DataName.LIST_TIME]
+        node_list = self.data[DataName.LIST_NODE]
+        line_list = self.data[DataName.LIST_LINE]
+
+        if not time_list:
+            raise ValueError('LIST_TIME cannot be empty when generating collapsed main-problem data.')
+
+        time_count = len(time_list)
+        first_time_idx = time_list[0]
+        method = self.main_problem_hat_data_method
+
+        if method not in {
+            MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
+            MainProblemHatDataMethodName.FIRST_TIME_EXPECTATION,
+        }:
+            raise ValueError(f'Unsupported main_problem_hat_data_method: {method}')
+
+        def _collapse_continuous(value_getter):
+            if method == MainProblemHatDataMethodName.WEIGHTED_AVERAGE:
+                return sum(
+                    prob_dict[s] * value_getter(t, s)
+                    for t in time_list
+                    for s in self.data[DataName.LIST_SCENARIO]
+                ) / time_count
+
+            return sum(
+                prob_dict[s] * value_getter(first_time_idx, s)
+                for s in self.data[DataName.LIST_SCENARIO]
+            )
+
+        def _collapse_binary(value_getter):
+            return int(_collapse_continuous(value_getter) >= 0.5)
+
+        self.data[DataName.DICT_HAT_DEMAND_ACTIVE] = {}
+        self.data[DataName.DICT_HAT_DEMAND_REACTIVE] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_NH] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_H] = {}
+
+        for j in node_list:
+            self.data[DataName.DICT_HAT_DEMAND_ACTIVE][j] = _collapse_continuous(
+                lambda t, s, node=j: self.data[DataName.DICT_DEMAND_ACTIVE][node, t, s]
+            )
+            self.data[DataName.DICT_HAT_DEMAND_REACTIVE][j] = _collapse_continuous(
+                lambda t, s, node=j: self.data[DataName.DICT_DEMAND_REACTIVE][node, t, s]
+            )
+
+        for (i, j) in line_list:
+            self.data[DataName.DICT_HAT_LINE_HEALTHY_NH][i, j] = _collapse_binary(
+                lambda t, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_NH][line_i, line_j, t, s]
+            )
+            self.data[DataName.DICT_HAT_LINE_HEALTHY_H][i, j] = _collapse_binary(
+                lambda t, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_H][line_i, line_j, t, s]
+            )
 
 
 if __name__ == "__main__":
@@ -379,8 +443,8 @@ if __name__ == "__main__":
     print("Running DataReader smoke test...")
 
     test_read_method = InputMethodName.LOCAL_CSV
-    test_file_path = '/Users/huangjiacheng/OR591/unit test/test_local_csv_file'
-    data_set_name = 'function test'
+    test_file_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file'
+    data_set_name = 'function_test_fixed_rated_p'
 
     from dao.data_reader import DataReader
 
@@ -394,6 +458,9 @@ if __name__ == "__main__":
     print("CSV read success:")
 
     DataProcessorModule = DataProcessor(r.raw_data)
-    processed_data = DataProcessorModule.data_process()
+    processed_data = DataProcessorModule.data_process(
+        scenario_list_assigned=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
+        time_list_assigned=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    )
 
     print('Data processing completed.')

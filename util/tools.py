@@ -4,6 +4,7 @@
 # @Email    : jiachenghuang0601@gmail.com
 
 
+import ast
 import pandas as pd
 import os
 import random
@@ -367,6 +368,30 @@ def load_warm_start(path):
     return out
 
 
+def load_main_stage_solution_json(path: str) -> Dict[str, Dict[Any, Any]]:
+    """
+    Load a main-stage solution JSON into the nested dict shape returned by model_main.get_result(...).
+    Expected top-level keys: xg, xl, xg_type. Stringified tuple keys in xl / xg_type are restored.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    out = {
+        VarName.DG_INSTALL: {},
+        VarName.LINE_HARDEN: {},
+        VarName.DG_INSTALL_TYPE: {},
+    }
+
+    for var_name in [VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE]:
+        for raw_key, raw_value in payload.get(var_name, {}).items():
+            key = raw_key
+            if var_name in [VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE]:
+                key = ast.literal_eval(raw_key)
+            out[var_name][key] = raw_value
+
+    return out
+
+
 def data_perturbation(file_path, perturb_type, sim_num, node_num=1, load_percent=0.1, line_num=1):
     """
     Generate random perturbations on CSV datasets in the origin folder.
@@ -525,4 +550,3 @@ if __name__ == '__main__':
 
     data_perturbation(load_perturb_path, 'load', sim_num, node_num=node_num, load_percent=load_percent)
     data_perturbation(broken_perturb_path, 'broken', sim_num, line_num=line_num)
-

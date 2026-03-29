@@ -57,19 +57,30 @@ def _quantize_obj_for_signature(obj: Any, tol: float = DEFAULT_CUT_SIGNATURE_TOL
     return obj
 
 
-def build_cut_signature_from_row(cut_type: str, row: dict, tol: float = DEFAULT_CUT_SIGNATURE_TOL):
+def build_cut_signature_from_row(
+    cut_type: str,
+    row: dict,
+    tol: float = DEFAULT_CUT_SIGNATURE_TOL,
+    include_cut_type: bool = True,
+):
     """
     Build a deterministic signature for a cut row independent of cut name.
     """
     payload = {
-        "cut_type": cut_type,
         "x_coef": row.get("x_coef", {}),
         "rhs": float(row.get("rhs", 0.0)),
     }
+    if include_cut_type:
+        payload["cut_type"] = cut_type
     return _canonicalize_nested_obj(_quantize_obj_for_signature(payload, tol=tol))
 
 
-def build_linear_expr_signature(expr, cut_type: str, tol: float = DEFAULT_CUT_SIGNATURE_TOL):
+def build_linear_expr_signature(
+    expr,
+    cut_type: str,
+    tol: float = DEFAULT_CUT_SIGNATURE_TOL,
+    include_cut_type: bool = True,
+):
     """
     Build a deterministic signature for a linear Pyomo expression.
     Returns None when the expression is not linear / parseable.
@@ -78,10 +89,11 @@ def build_linear_expr_signature(expr, cut_type: str, tol: float = DEFAULT_CUT_SI
     if const is None and var_coef is None:
         return None
     payload = {
-        "cut_type": cut_type,
         "constant": float(const),
         "var_coef": var_coef,
     }
+    if include_cut_type:
+        payload["cut_type"] = cut_type
     return _canonicalize_nested_obj(_quantize_obj_for_signature(payload, tol=tol))
 
 
@@ -122,19 +134,78 @@ class CutRepetitionTracker:
             }
         return record
 
-    def record_by_row(self, cut_type: str, ite_name, cut_name: str, row: dict, sub_sce_list: Optional[List] = None) -> dict:
+    def _build_peek_record(self, first_record) -> dict:
+        return {
+            "is_repeated": first_record is not None,
+            "first_seen_iteration": first_record["iteration"] if first_record is not None else None,
+            "first_seen_cut_name": first_record["cut_name"] if first_record is not None else None,
+        }
+
+    def peek_by_row(
+        self,
+        cut_type: str,
+        row: dict,
+        include_cut_type: bool = True,
+    ) -> dict:
+        signature = build_cut_signature_from_row(
+            cut_type=cut_type,
+            row=row,
+            include_cut_type=include_cut_type,
+        )
+        return self._build_peek_record(self.seen_signatures.get(signature))
+
+    def peek_by_expr(
+        self,
+        cut_type: str,
+        expr,
+        include_cut_type: bool = True,
+    ) -> dict:
+        signature = build_linear_expr_signature(
+            expr=expr,
+            cut_type=cut_type,
+            include_cut_type=include_cut_type,
+        )
+        if signature is None:
+            signature = ("fallback", cut_type if include_cut_type else None, str(expr))
+        return self._build_peek_record(self.seen_signatures.get(signature))
+
+    def record_by_row(
+        self,
+        cut_type: str,
+        ite_name,
+        cut_name: str,
+        row: dict,
+        sub_sce_list: Optional[List] = None,
+        include_cut_type: bool = True,
+    ) -> dict:
         return self._record(
-            signature=build_cut_signature_from_row(cut_type=cut_type, row=row),
+            signature=build_cut_signature_from_row(
+                cut_type=cut_type,
+                row=row,
+                include_cut_type=include_cut_type,
+            ),
             cut_type=cut_type,
             ite_name=ite_name,
             cut_name=cut_name,
             sub_sce_list=sub_sce_list,
         )
 
-    def record_by_expr(self, cut_type: str, ite_name, cut_name: str, expr, sub_sce_list: Optional[List] = None) -> dict:
-        signature = build_linear_expr_signature(expr=expr, cut_type=cut_type)
+    def record_by_expr(
+        self,
+        cut_type: str,
+        ite_name,
+        cut_name: str,
+        expr,
+        sub_sce_list: Optional[List] = None,
+        include_cut_type: bool = True,
+    ) -> dict:
+        signature = build_linear_expr_signature(
+            expr=expr,
+            cut_type=cut_type,
+            include_cut_type=include_cut_type,
+        )
         if signature is None:
-            signature = ("fallback", cut_type, str(expr))
+            signature = ("fallback", cut_type if include_cut_type else None, str(expr))
         return self._record(
             signature=signature,
             cut_type=cut_type,

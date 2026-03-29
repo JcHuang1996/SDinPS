@@ -16,7 +16,7 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 from util.project_logger import init_logger
-from util.names import VarName, InputMethodName
+from util.names import VarName, InputMethodName, MainProblemHatDataMethodName
 from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
@@ -63,8 +63,11 @@ def run_decomp_module_test(
     strengthen_benders_cut_iter_range: Optional[Tuple[int, int]] = None,
     lagrangian_cut_iter_range: Optional[Tuple[int, int]] = None,
     cglp_cut_iter_range: Optional[Tuple[int, int]] = None,
+    integer_opt_cut_iter_range: Optional[Tuple[int, int]] = None,
     record_incumbent_every_k: Optional[int] = None,
     use_aggregated_cuts: bool = False,
+    main_problem_hat_data_method: str = MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
+    added_obj_term_weight: float = 0.0,
 ):
     """Run the decomposition module test.
 
@@ -81,6 +84,7 @@ def run_decomp_module_test(
         strengthen_benders_cut_iter_range: (first_iter, last_iter) to add strengthened Benders cuts; None to skip.
         lagrangian_cut_iter_range: (first_iter, last_iter) to add Lagrangian cuts; None to skip.
         cglp_cut_iter_range: (first_iter, last_iter) to add CGLP cuts; None to skip.
+        integer_opt_cut_iter_range: (first_iter, last_iter) to add integer optimality cuts; None to skip.
         record_incumbent_every_k: If a positive integer k, record incumbent and run convergence check only every k
             iterations (0, k, 2k, ...). If None, record every iteration. When not recording, solve_sub_model() is
             skipped and Benders cut uses relaxed LP objective (get_relaxed_obj_value()); strengthen/Lagrangian
@@ -88,6 +92,8 @@ def run_decomp_module_test(
         use_aggregated_cuts: If False, generate and add one cut per scenario group (sub_sce_list). If True,
             collect (lhs, rhs, weight) for each group with weight = sum of scenario probabilities, then add
             exactly one cut per iteration per cut type using probability-weighted lhs and rhs.
+        main_problem_hat_data_method: Method used to collapse time/scenario-dependent data for the enriched main model.
+        added_obj_term_weight: Scalar weight of the added master-only operating objective terms.
     """
     # Set default values
     if scenario_list is None:
@@ -119,6 +125,7 @@ def run_decomp_module_test(
         ("strengthen_benders_cut_iter_range", strengthen_benders_cut_iter_range),
         ("lagrangian_cut_iter_range", lagrangian_cut_iter_range),
         ("cglp_cut_iter_range", cglp_cut_iter_range),
+        ("integer_opt_cut_iter_range", integer_opt_cut_iter_range),
     ]:
         if val is not None:
             _check_iter_range(name, val, max_iterations)
@@ -127,6 +134,8 @@ def run_decomp_module_test(
         raise ValueError("record_incumbent_every_k must be a positive integer or None")
     if use_aggregated_cuts and cglp_cut_iter_range is not None:
         raise NotImplementedError("CGLP cuts are only wired for use_aggregated_cuts=False.")
+    if use_aggregated_cuts and integer_opt_cut_iter_range is not None:
+        raise NotImplementedError("Integer optimality cuts are only wired for use_aggregated_cuts=False.")
 
     init_logger(enable_file_output=enable_log_output)
 
@@ -153,9 +162,11 @@ def run_decomp_module_test(
         time_list=time_list,
         scenario_list=scenario_list,
     )
+    two_stage_decomp_module.data_processor_module.main_problem_hat_data_method = main_problem_hat_data_method
 
     # build main model
     two_stage_decomp_module.build_main_stage_model()
+    two_stage_decomp_module.model_main.set_added_obj_term_weight(added_obj_term_weight)
 
     (expectation, keys_above, keys_below, sum_above, sum_below,
      true_keys_above, true_keys_below, true_sum_above, true_sum_below, best_hat) = analyze_scenario_solutions(
@@ -269,6 +280,7 @@ def run_decomp_module_test(
                 strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
                 lagrangian_cut_iter_range=lagrangian_cut_iter_range,
                 cglp_cut_iter_range=cglp_cut_iter_range,
+                integer_opt_cut_iter_range=integer_opt_cut_iter_range,
                 main_stage_obj=main_stage_obj if do_record_incumbent else None,
                 incumbent_records=incumbent_records,
                 max_lagrangian_ite=10,
@@ -309,8 +321,11 @@ def run_decomp_module_test(
             "strengthen_benders_cut_iter_range": strengthen_benders_cut_iter_range,
             "lagrangian_cut_iter_range": lagrangian_cut_iter_range,
             "cglp_cut_iter_range": cglp_cut_iter_range,
+            "integer_opt_cut_iter_range": integer_opt_cut_iter_range,
             "record_incumbent_every_k": record_incumbent_every_k,
             "use_aggregated_cuts": use_aggregated_cuts,
+            "main_problem_hat_data_method": main_problem_hat_data_method,
+            "added_obj_term_weight": added_obj_term_weight,
         },
     )
 
@@ -350,7 +365,7 @@ def run_decomp_module_test(
 
 
 if __name__ == "__main__":
-    _max_iter = 200
+    _max_iter = 30
     run_decomp_module_test(
         enable_log_output=False,
         enable_result_output=True,
@@ -361,11 +376,13 @@ if __name__ == "__main__":
         test_file_path=None,
         data_set_name='function_test_fixed_rated_p',
         max_iterations=_max_iter,
-        output_label='test_all_cut_long',
+        output_label='test_new_m_all_c',
         benders_cut_iter_range=(0, _max_iter - 1),
         strengthen_benders_cut_iter_range=(0, _max_iter - 1),
-        lagrangian_cut_iter_range=(_max_iter - 75, _max_iter - 1),
-        cglp_cut_iter_range=(_max_iter - 75, _max_iter - 1),
-        record_incumbent_every_k=4,
+        # lagrangian_cut_iter_range=(0, _max_iter - 1),
+        # cglp_cut_iter_range=(0, _max_iter - 1),
+        record_incumbent_every_k=2,
         use_aggregated_cuts=False,
+        main_problem_hat_data_method=MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
+        added_obj_term_weight= 2.0,
     )

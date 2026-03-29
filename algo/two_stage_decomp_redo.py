@@ -15,7 +15,6 @@ from algo.algo_simple_tools import (
     build_cglp_lower_bound_row_from_multiplier_cut,
     flatten_ordered_var_values,
     normalize_affine_lower_bound_row,
-    split_main_model_var_keys_for_cglp,
 )
 from util.tools import iter_general_csv, iter_sub_prob_info
 
@@ -74,8 +73,8 @@ class TwoStageDecompRedo:
         self.model_main = ModelMain(model_name='Main', model_data=self.main_model_data)
         self.model_main.build_main_model()
 
-        self.main_stage_structural_constr_name_list = list(self.model_main._constr_name_map.keys())
-        self.cglp_x_var_key_list, self.cglp_z_var_key_list = split_main_model_var_keys_for_cglp(self.model_main)
+        self.main_stage_structural_constr_name_list = self.model_main.get_decomposition_structural_constr_name_list()
+        self.cglp_x_var_key_list, self.cglp_z_var_key_list = self.model_main.get_decomposition_var_key_lists_for_cglp()
 
     def solve_main_stage_model(self):
         # solve the main model, and compute the obj terms
@@ -93,12 +92,8 @@ class TwoStageDecompRedo:
 
     def record_main_stage_model(self, ite_name=None):
         # show and record the main model objective value (the best bound objective value)
-        total_objective_value = self.model_main.get_obj_value()
-        main_stage_objective_value = (
-                self.model_main.obj_term_value[ObjName.DG_FIXED_COST]
-                + self.model_main.obj_term_value[ObjName.LINE_HARDEN_COST]
-                + self.model_main.obj_term_value[ObjName.DG_VARIANT_COST]
-        )
+        total_objective_value = self.model_main.get_iteration_bound_value()
+        main_stage_objective_value = self.model_main.get_design_objective_value()
 
         # create the corresponding dict if
         if ite_name not in self.ite_obj_value_dict:
@@ -292,6 +287,57 @@ class TwoStageDecompRedo:
 
         return lhs, rhs
 
+    def gen_sce_int_opt_cut(
+        self,
+        sub_sce_list,
+        exact_sub_obj_value,
+        forward_sol,
+        lower_bound: float = 0.0,
+    ):
+        """
+        Generate the standard integer optimality cut for one scenario group:
+            theta_group >= Q(x*) + (Q(x*) - L) * (sum_{i in S(x*)} x_i - sum_{i notin S(x*)} x_i - |S(x*)|).
+        """
+        tol = 1e-6
+        exact_sub_obj_value = float(exact_sub_obj_value)
+        lower_bound = float(lower_bound)
+
+        if lower_bound > exact_sub_obj_value + tol:
+            raise ValueError(
+                f"lower_bound ({lower_bound}) cannot exceed exact_sub_obj_value ({exact_sub_obj_value})"
+            )
+
+        lhs = pyo.quicksum(
+            self.model_main.var[VarName.SUB_OBJ_EST][sub_sce] for sub_sce in sub_sce_list
+        )
+
+        gap = exact_sub_obj_value - lower_bound
+        one_count = 0
+        var_coef_dict = {}
+        rhs_terms = []
+
+        for var_name, var_key in self.cglp_x_var_key_list:
+            var_value = float(forward_sol[var_name][var_key])
+            if math.isclose(var_value, 1.0, abs_tol=tol):
+                coef = gap
+                one_count += 1
+            elif math.isclose(var_value, 0.0, abs_tol=tol):
+                coef = -gap
+            else:
+                raise ValueError(
+                    f"Integer optimality cut requires binary forward solution; got {var_name}[{var_key}]={var_value}"
+                )
+
+            if var_name not in var_coef_dict:
+                var_coef_dict[var_name] = {}
+            var_coef_dict[var_name][var_key] = coef
+            rhs_terms.append(coef * self.model_main.var[var_name][var_key])
+
+        constant_term = exact_sub_obj_value - gap * one_count
+        rhs = constant_term + pyo.quicksum(rhs_terms)
+
+        return lhs, rhs
+
     def _register_group_lower_bound_row(self, sub_sce_list: List, row: dict):
         group_key = tuple(sub_sce_list)
         self._ensure_group_lower_bound_rows(sub_sce_list=sub_sce_list)
@@ -344,6 +390,8 @@ class TwoStageDecompRedo:
         exact_sub_obj_value,
         cut_name_prefix: str = "cglp",
         should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        should_add_cut_row: Optional[Callable[[dict, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
     ) -> Optional[Tuple[str, Any, Any, Dict, float]]:
         group_key = tuple(sub_sce_list)
         self._ensure_group_lower_bound_rows(sub_sce_list=sub_sce_list)
@@ -377,15 +425,21 @@ class TwoStageDecompRedo:
             return None
 
         alpha, eta, cglp_lhs, cglp_rhs = cglp_model.solve_and_build_group_cut(model_main=self.model_main)
+        cglp_row = build_cglp_lower_bound_row_from_alpha_eta(
+            cut_name=f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}",
+            alpha=alpha,
+            eta=eta,
+        )
 
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
-        if should_add_cut is None or should_add_cut(cglp_lhs, cglp_rhs, cut_name):
+        cglp_row["name"] = cut_name
+        should_add = True
+        if should_add_cut_row is not None:
+            should_add = should_add_cut_row(cglp_row, cut_name)
+        elif should_add_cut is not None:
+            should_add = should_add_cut(cglp_lhs, cglp_rhs, cut_name)
+        if should_add:
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=cglp_lhs, cut_rhs=cglp_rhs)
-            cglp_row = build_cglp_lower_bound_row_from_alpha_eta(
-                cut_name=cut_name,
-                alpha=alpha,
-                eta=eta,
-            )
             self._register_group_lower_bound_row(
                 sub_sce_list=sub_sce_list,
                 row=cglp_row
@@ -396,6 +450,7 @@ class TwoStageDecompRedo:
                 cut_name=cut_name,
                 row=cglp_row,
                 sub_sce_list=sub_sce_list,
+                include_cut_type=include_cut_type_in_repetition,
             )
 
         return cut_name, cglp_lhs, cglp_rhs, alpha, eta
@@ -610,6 +665,9 @@ class TwoStageDecompRedo:
         constr_var_map,
         forward_sol,
         cut_name_prefix: str = "bd",
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        should_add_cut_row: Optional[Callable[[dict, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
     ) -> Tuple[str, Any, Any]:
         """
         Generate Benders optimality cut (via gen_sce_bds_opt_cut) and add it to the main model.
@@ -622,7 +680,6 @@ class TwoStageDecompRedo:
             forward_sol=forward_sol,
         )
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
-        self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=bd_lhs, cut_rhs=bd_rhs)
         bd_row = build_cglp_lower_bound_row_from_multiplier_cut(
             cut_name=cut_name,
             base_value=sub_obj_value,
@@ -630,18 +687,97 @@ class TwoStageDecompRedo:
             constr_var_map=constr_var_map,
             ref_point=forward_sol,
         )
-        self._register_group_lower_bound_row(
-            sub_sce_list=sub_sce_list,
-            row=bd_row
-        )
-        self.cut_repetition_tracker.record_by_row(
-            cut_type="benders",
-            ite_name=ite_name,
-            cut_name=cut_name,
-            row=bd_row,
-            sub_sce_list=sub_sce_list,
-        )
+        should_add = True
+        if should_add_cut_row is not None:
+            should_add = should_add_cut_row(bd_row, cut_name)
+        elif should_add_cut is not None:
+            should_add = should_add_cut(bd_lhs, bd_rhs, cut_name)
+        if should_add:
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=bd_lhs, cut_rhs=bd_rhs)
+            self._register_group_lower_bound_row(
+                sub_sce_list=sub_sce_list,
+                row=bd_row
+            )
+            self.cut_repetition_tracker.record_by_row(
+                cut_type="benders",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                row=bd_row,
+                sub_sce_list=sub_sce_list,
+                include_cut_type=include_cut_type_in_repetition,
+            )
         return cut_name, bd_lhs, bd_rhs
+
+    def add_integer_opt_cut(
+        self,
+        sub_sce_list,
+        ite_name,
+        exact_sub_obj_value,
+        forward_sol,
+        lower_bound: float = 0.0,
+        cut_name_prefix: str = "int_opt",
+        should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        should_add_cut_row: Optional[Callable[[dict, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
+    ) -> Tuple[str, Any, Any]:
+        """
+        Generate the standard integer optimality cut and optionally add it to the main model.
+        Returns (cut_name, lhs, rhs).
+        """
+        int_lhs, int_rhs = self.gen_sce_int_opt_cut(
+            sub_sce_list=sub_sce_list,
+            exact_sub_obj_value=exact_sub_obj_value,
+            forward_sol=forward_sol,
+            lower_bound=lower_bound,
+        )
+
+        gap = float(exact_sub_obj_value) - float(lower_bound)
+        var_coef_dict = {}
+        one_count = 0
+        tol = 1e-6
+        for var_name, var_key in self.cglp_x_var_key_list:
+            var_value = float(forward_sol[var_name][var_key])
+            if math.isclose(var_value, 1.0, abs_tol=tol):
+                coef = gap
+                one_count += 1
+            elif math.isclose(var_value, 0.0, abs_tol=tol):
+                coef = -gap
+            else:
+                raise ValueError(
+                    f"Integer optimality cut requires binary forward solution; got {var_name}[{var_key}]={var_value}"
+                )
+
+            if var_name not in var_coef_dict:
+                var_coef_dict[var_name] = {}
+            var_coef_dict[var_name][var_key] = coef
+
+        cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
+        int_row = normalize_affine_lower_bound_row(
+            cut_name=cut_name,
+            constant_term=float(exact_sub_obj_value) - gap * one_count,
+            var_coef_dict=var_coef_dict,
+        )
+        should_add = True
+        if should_add_cut_row is not None:
+            should_add = should_add_cut_row(int_row, cut_name)
+        elif should_add_cut is not None:
+            should_add = should_add_cut(int_lhs, int_rhs, cut_name)
+        if should_add:
+            self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=int_lhs, cut_rhs=int_rhs)
+            self._register_group_lower_bound_row(
+                sub_sce_list=sub_sce_list,
+                row=int_row
+            )
+            self.cut_repetition_tracker.record_by_row(
+                cut_type="integer_opt",
+                ite_name=ite_name,
+                cut_name=cut_name,
+                row=int_row,
+                sub_sce_list=sub_sce_list,
+                include_cut_type=include_cut_type_in_repetition,
+            )
+
+        return cut_name, int_lhs, int_rhs
 
     def add_strengthen_benders_cut(
         self,
@@ -652,6 +788,8 @@ class TwoStageDecompRedo:
         constr_var_map,
         cut_name_prefix: str = "str_bd",
         should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        should_add_cut_row: Optional[Callable[[dict, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
     ) -> Tuple[str, Any, Any, float, Any]:
         """
         Generate strengthened Benders cut (via gen_sce_strengthen_bds_cut) and optionally add it.
@@ -666,15 +804,20 @@ class TwoStageDecompRedo:
             constr_var_map=constr_var_map,
         )
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
-        if should_add_cut is None or should_add_cut(sbd_lhs, sbd_rhs, cut_name):
+        sbd_row = build_cglp_lower_bound_row_from_multiplier_cut(
+            cut_name=cut_name,
+            base_value=obtained_sub_obj,
+            multiplier_info=given_dual_info,
+            constr_var_map=constr_var_map,
+            ref_point=obtained_main_sol,
+        )
+        should_add = True
+        if should_add_cut_row is not None:
+            should_add = should_add_cut_row(sbd_row, cut_name)
+        elif should_add_cut is not None:
+            should_add = should_add_cut(sbd_lhs, sbd_rhs, cut_name)
+        if should_add:
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=sbd_lhs, cut_rhs=sbd_rhs)
-            sbd_row = build_cglp_lower_bound_row_from_multiplier_cut(
-                cut_name=cut_name,
-                base_value=obtained_sub_obj,
-                multiplier_info=given_dual_info,
-                constr_var_map=constr_var_map,
-                ref_point=obtained_main_sol,
-            )
             self._register_group_lower_bound_row(
                 sub_sce_list=sub_sce_list,
                 row=sbd_row
@@ -685,6 +828,7 @@ class TwoStageDecompRedo:
                 cut_name=cut_name,
                 row=sbd_row,
                 sub_sce_list=sub_sce_list,
+                include_cut_type=include_cut_type_in_repetition,
             )
         return cut_name, sbd_lhs, sbd_rhs, obtained_sub_obj, obtained_main_sol
 
@@ -698,6 +842,8 @@ class TwoStageDecompRedo:
         max_ite_num: int = 10,
         cut_name_prefix: str = "str_lag",
         should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        should_add_cut_row: Optional[Callable[[dict, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
     ) -> Tuple[str, Any, Any, float, Any]:
         """
         Generate Lagrangian cut (via gen_sub_sce_lag_cut_heuristic) and optionally add it.
@@ -713,15 +859,20 @@ class TwoStageDecompRedo:
             max_ite_num=max_ite_num,
         )
         cut_name = f"{cut_name_prefix}_s_{str(sub_sce_list)}_{ite_name}"
-        if should_add_cut is None or should_add_cut(lg_lhs, lg_rhs, cut_name):
+        lg_row = build_cglp_lower_bound_row_from_multiplier_cut(
+            cut_name=cut_name,
+            base_value=sub_obj,
+            multiplier_info=lag_multiplier,
+            constr_var_map=constr_var_map,
+            ref_point=main_sol,
+        )
+        should_add = True
+        if should_add_cut_row is not None:
+            should_add = should_add_cut_row(lg_row, cut_name)
+        elif should_add_cut is not None:
+            should_add = should_add_cut(lg_lhs, lg_rhs, cut_name)
+        if should_add:
             self.model_main.add_custom_cut(cut_name=cut_name, cut_lhs=lg_lhs, cut_rhs=lg_rhs)
-            lg_row = build_cglp_lower_bound_row_from_multiplier_cut(
-                cut_name=cut_name,
-                base_value=sub_obj,
-                multiplier_info=lag_multiplier,
-                constr_var_map=constr_var_map,
-                ref_point=main_sol,
-            )
             self._register_group_lower_bound_row(
                 sub_sce_list=sub_sce_list,
                 row=lg_row
@@ -732,6 +883,7 @@ class TwoStageDecompRedo:
                 cut_name=cut_name,
                 row=lg_row,
                 sub_sce_list=sub_sce_list,
+                include_cut_type=include_cut_type_in_repetition,
             )
         return cut_name, lg_lhs, lg_rhs, sub_obj, main_sol
 
@@ -741,6 +893,7 @@ class TwoStageDecompRedo:
         ite_name: str,
         cut_terms: List[Tuple[Any, Any, float]],
         should_add_cut: Optional[Callable[[Any, Any, str], bool]] = None,
+        include_cut_type_in_repetition: bool = True,
     ) -> Tuple[str, Any, Any]:
         """
         Add a single cut for this iteration using a probability-weighted sum of per-scenario cuts.
@@ -762,6 +915,7 @@ class TwoStageDecompRedo:
                 cut_name=cut_name,
                 expr=agg_lhs - agg_rhs,
                 sub_sce_list=None,
+                include_cut_type=include_cut_type_in_repetition,
             )
         return cut_name, agg_lhs, agg_rhs
 
@@ -774,15 +928,21 @@ class TwoStageDecompRedo:
         add_strengthen: bool,
         add_lagrangian: bool,
         add_cglp: bool,
+        need_frac_sub_model: bool = False,
+        need_exact_sub_obj: bool = False,
         main_stage_obj: Optional[float] = None,
         incumbent_records: Optional[List] = None,
-    ) -> Tuple[float, Any, Any, Optional[Any], Optional[Any], Optional[float]]:
+    ) -> Tuple[float, Any, Any, Optional[Any], Optional[Any], Optional[float], Optional[float]]:
         """
         Build sub model for sub_sce_list, solve relaxed, optionally record incumbent, collect duals.
-        If add_strengthen or add_lagrangian, also build/solve frac model and return frac duals.
+        If add_strengthen / add_lagrangian / need_frac_sub_model, also build/solve frac model and return
+        frac duals plus relaxed objective value at the fractional main-stage point.
         When incumbent_records is not None, solve sub, record, and append (sub_sce_list, sub_obj_w_main, sub_res).
-        Returns (sub_obj_value_for_benders, constr_dual_bi, constr_var_map_bi, constr_dual_frac, constr_var_map_frac).
-        constr_dual_frac and constr_var_map_frac are None when both add_strengthen and add_lagrangian are False.
+        Returns
+        (sub_obj_value_for_benders, constr_dual_bi, constr_var_map_bi, constr_dual_frac, constr_var_map_frac,
+         exact_sub_obj_value, frac_sub_obj_value_for_benders).
+        constr_dual_frac / constr_var_map_frac / frac_sub_obj_value_for_benders are None when the fractional
+        sub model is not requested.
         """
         self.build_sub_model_redo(
             sub_model_sce_list=sub_sce_list,
@@ -793,7 +953,7 @@ class TwoStageDecompRedo:
         sub_obj_value_for_benders = self.current_sub_model.get_relaxed_obj_value()
 
         exact_sub_obj_value = None
-        if incumbent_records is not None or add_cglp:
+        if incumbent_records is not None or add_cglp or need_exact_sub_obj:
             self.solve_sub_model()
             exact_sub_obj_value = self.current_sub_model.get_obj_value()
             self._register_exact_point_for_group(
@@ -817,12 +977,14 @@ class TwoStageDecompRedo:
         )
 
         constr_dual_frac, constr_var_map_frac = None, None
-        if add_strengthen or add_lagrangian:
+        frac_sub_obj_value_for_benders = None
+        if add_strengthen or add_lagrangian or need_frac_sub_model:
             self.build_sub_frac_model(
                 sub_model_sce_list=sub_sce_list,
                 given_main_frac_result=frac_main_result,
             )
             self.solve_sub_frac_model()
+            frac_sub_obj_value_for_benders = self.curr_sub_frac_model.get_relaxed_obj_value()
             constr_dual_frac, constr_var_map_frac = self.curr_sub_frac_model.collect_dual_opt_sol(
                 constr_to_collect_list=local_copy_var_constr_name
             )
@@ -834,6 +996,7 @@ class TwoStageDecompRedo:
             constr_dual_frac,
             constr_var_map_frac,
             exact_sub_obj_value,
+            frac_sub_obj_value_for_benders,
         )
 
     def run_iteration_cuts_per_scenario(
@@ -847,6 +1010,7 @@ class TwoStageDecompRedo:
         strengthen_benders_cut_iter_range: Optional[Tuple[int, int]],
         lagrangian_cut_iter_range: Optional[Tuple[int, int]],
         cglp_cut_iter_range: Optional[Tuple[int, int]],
+        integer_opt_cut_iter_range: Optional[Tuple[int, int]] = None,
         *,
         main_stage_obj: Optional[float] = None,
         incumbent_records: Optional[List] = None,
@@ -872,6 +1036,10 @@ class TwoStageDecompRedo:
             cglp_cut_iter_range is not None
             and cglp_cut_iter_range[0] <= ite_num <= cglp_cut_iter_range[1]
         )
+        add_integer_opt = (
+            integer_opt_cut_iter_range is not None
+            and integer_opt_cut_iter_range[0] <= ite_num <= integer_opt_cut_iter_range[1]
+        )
 
         for sub_sce_list in sce_group_list:
             (
@@ -881,6 +1049,7 @@ class TwoStageDecompRedo:
                 constr_dual_frac,
                 constr_var_map_frac,
                 exact_sub_obj_value,
+                _,
             ) = self._gather_one_group_cut_data(
                 sub_sce_list=sub_sce_list,
                 curr_main_result=curr_main_result,
@@ -889,6 +1058,7 @@ class TwoStageDecompRedo:
                 add_strengthen=add_strengthen,
                 add_lagrangian=add_lagrangian,
                 add_cglp=add_cglp,
+                need_exact_sub_obj=add_cglp or add_integer_opt,
                 main_stage_obj=main_stage_obj,
                 incumbent_records=incumbent_records,
             )
@@ -930,6 +1100,15 @@ class TwoStageDecompRedo:
                     exact_sub_obj_value=exact_sub_obj_value,
                 )
 
+            if add_integer_opt and exact_sub_obj_value is not None:
+                self.add_integer_opt_cut(
+                    sub_sce_list=sub_sce_list,
+                    ite_name=ite_name,
+                    exact_sub_obj_value=exact_sub_obj_value,
+                    forward_sol=curr_main_result,
+                    lower_bound=0.0,
+                )
+
     def run_iteration_cuts_for_given_main_result(
         self,
         sce_group_list: List[List],
@@ -956,6 +1135,7 @@ class TwoStageDecompRedo:
                 constr_dual_frac,
                 constr_var_map_frac,
                 exact_sub_obj_value,
+                _,
             ) = self._gather_one_group_cut_data(
                 sub_sce_list=sub_sce_list,
                 curr_main_result=given_main_result,
@@ -1052,6 +1232,7 @@ class TwoStageDecompRedo:
                 constr_var_map_bi,
                 constr_dual_frac,
                 constr_var_map_frac,
+                _,
                 _,
             ) = self._gather_one_group_cut_data(
                 sub_sce_list=sub_sce_list,
