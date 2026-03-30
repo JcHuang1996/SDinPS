@@ -24,6 +24,10 @@ class ModelMain(ModelCombined):
         super().__init__(model_name=model_name, model_data=model_data)
 
         self.added_obj_term_weight = 0.0
+        self.main_problem_model_type = (
+            model_data.get(DataName.MAIN_PROBLEM_MODEL_TYPE, MainProblemModelTypeName.COLLAPSED_NO_TIME)
+            if model_data is not None else MainProblemModelTypeName.COLLAPSED_NO_TIME
+        )
         self.decomposition_state_var_name_list = [
             VarName.DG_INSTALL,
             VarName.LINE_HARDEN,
@@ -39,13 +43,31 @@ class ModelMain(ModelCombined):
         self.add_constr_DG_ub()
         self.decomposition_structural_constr_name_list = list(self._constr_name_map.keys())
 
+        self._validate_main_problem_model_type()
+
         # adding specific components of main model
-        self.add_vars_collapsed_sp()
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_NO_TIME:
+            self.add_vars_collapsed_sp_no_time()
+        elif self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_BY_TIME:
+            self.add_vars_collapsed_sp_by_time()
+
         self.add_vars_cut()
-        self.add_constr_collapsed_sp()
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_NO_TIME:
+            self.add_constr_collapsed_sp_no_time()
+        elif self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_BY_TIME:
+            self.add_constr_collapsed_sp_by_time()
 
         # set objective of main model
         self.set_main_objective()
+
+    def _validate_main_problem_model_type(self):
+        supported_types = {
+            MainProblemModelTypeName.BASE,
+            MainProblemModelTypeName.COLLAPSED_NO_TIME,
+            MainProblemModelTypeName.COLLAPSED_BY_TIME,
+        }
+        if self.main_problem_model_type not in supported_types:
+            raise ValueError(f'Unsupported main_problem_model_type: {self.main_problem_model_type}')
 
     def get_decomposition_state_var_name_list(self):
         return list(self.decomposition_state_var_name_list)
@@ -76,7 +98,7 @@ class ModelMain(ModelCombined):
             for s in self.data[DataName.LIST_SCENARIO]
         }
 
-    def add_vars_collapsed_sp(self):
+    def add_vars_collapsed_sp_no_time(self):
         self.add_vars_basic_generator_c()
 
         self.var[VarName.MAIN_LINE_CONNECTED] = {
@@ -159,7 +181,100 @@ class ModelMain(ModelCombined):
             for j in self.data[DataName.LIST_NODE]
         }
 
-    def add_constr_collapsed_sp(self):
+    def add_vars_collapsed_sp_by_time(self):
+        self.add_vars_basic_generator_c()
+
+        self.var[VarName.MAIN_LINE_CONNECTED] = {
+            (i, j, t): self.add_var(
+                domain=pyo.Binary,
+                name=f'{VarName.MAIN_LINE_CONNECTED}_({i},{j},{t})'
+            )
+            for (i, j) in self.data[DataName.LIST_LINE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_LOAD_SHED_RATIO] = {
+            (j, t): self.add_var(
+                domain=pyo.Reals, lb=0, ub=1,
+                name=f'{VarName.MAIN_LOAD_SHED_RATIO}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_BUS_VOLTAGE] = {
+            (j, t): self.add_var(
+                domain=pyo.Reals, lb=0,
+                name=f'{VarName.MAIN_BUS_VOLTAGE}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_DG_ACTIVE_POWER] = {
+            (j, t): self.add_var(
+                domain=pyo.Reals,
+                name=f'{VarName.MAIN_DG_ACTIVE_POWER}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_DG_REACTIVE_POWER] = {
+            (j, t): self.add_var(
+                domain=pyo.Reals,
+                name=f'{VarName.MAIN_DG_REACTIVE_POWER}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_LINE_ACTIVE_FLOW] = {
+            (i, j, t): self.add_var(
+                domain=pyo.Reals,
+                name=f'{VarName.MAIN_LINE_ACTIVE_FLOW}_({i},{j},{t})'
+            )
+            for (i, j) in self.data[DataName.LIST_LINE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_LINE_REACTIVE_FLOW] = {
+            (i, j, t): self.add_var(
+                domain=pyo.Reals,
+                name=f'{VarName.MAIN_LINE_REACTIVE_FLOW}_({i},{j},{t})'
+            )
+            for (i, j) in self.data[DataName.LIST_LINE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_VIRTUAL_LINE_FLOW] = {
+            (i, j, t): self.add_var(
+                domain=pyo.Reals,
+                name=f'{VarName.MAIN_VIRTUAL_LINE_FLOW}_({i},{j},{t})'
+            )
+            for (i, j) in self.data[DataName.LIST_LINE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_VIRTUAL_SOURCE_INDICATOR] = {
+            (j, t): self.add_var(
+                domain=pyo.Binary,
+                name=f'{VarName.MAIN_VIRTUAL_SOURCE_INDICATOR}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+        self.var[VarName.MAIN_VIRTUAL_INJECT_POWER] = {
+            (j, t): self.add_var(
+                domain=pyo.Reals, lb=0,
+                name=f'{VarName.MAIN_VIRTUAL_INJECT_POWER}_({j},{t})'
+            )
+            for j in self.data[DataName.LIST_NODE]
+            for t in self.data[DataName.LIST_TIME]
+        }
+
+    def add_constr_collapsed_sp_no_time(self):
         # Generator rated power linking
         for j in self.data[DataName.LIST_NODE]:
             self.add_constr(
@@ -349,6 +464,203 @@ class ModelMain(ModelCombined):
                 name=f'{ConstrName.MAIN_LINE_THERMAL_C3}_R_{i}_{j}'
             )
 
+    def add_constr_collapsed_sp_by_time(self):
+        # Generator rated power linking
+        for j in self.data[DataName.LIST_NODE]:
+            self.add_constr(
+                self.var[VarName.DG_RATED_POWER][j]
+                == pyo.quicksum(
+                    self.data[DataName.DICT_DG_RATED_POWER][typ] * self.var[VarName.DG_INSTALL_TYPE][j, typ]
+                    for typ in self.data[DataName.LIST_DG_TYPE]
+                ),
+                name=f'{ConstrName.MAIN_DG_OPERATION}_{j}'
+            )
+
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    self.var[VarName.MAIN_LINE_CONNECTED][i, j, t]
+                    <= self.data[DataName.DICT_HAT_LINE_HEALTHY_NH_BY_TIME][i, j, t] * (1 - self.var[VarName.LINE_HARDEN][i, j])
+                    + self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_TIME][i, j, t] * self.var[VarName.LINE_HARDEN][i, j],
+                    name=f'{ConstrName.MAIN_LINE_CONNECTED}_{i}_{j}_{t}'
+                )
+
+        virtual_injection_m = len(self.data[DataName.LIST_NODE])
+        for j in self.data[DataName.LIST_NODE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    pyo.quicksum(
+                        self.var[VarName.MAIN_VIRTUAL_LINE_FLOW][j, k, t] for k in self.data[DataName.DICT_NODE_CHILDREN][j]
+                    )
+                    - pyo.quicksum(
+                        self.var[VarName.MAIN_VIRTUAL_LINE_FLOW][i, j, t] for i in self.data[DataName.DICT_NODE_PARENTS][j]
+                    )
+                    == self.var[VarName.MAIN_VIRTUAL_INJECT_POWER][j, t] - 1,
+                    name=f'{ConstrName.MAIN_VIRTUAL_FLOW_BAL_C1}_{j}_{t}'
+                )
+
+                self.add_constr(
+                    self.var[VarName.MAIN_VIRTUAL_INJECT_POWER][j, t]
+                    <= virtual_injection_m * self.var[VarName.MAIN_VIRTUAL_SOURCE_INDICATOR][j, t],
+                    name=f'{ConstrName.MAIN_VIRTUAL_FLOW_BAL_C2}_{j}_{t}'
+                )
+
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    -virtual_injection_m * self.var[VarName.MAIN_LINE_CONNECTED][i, j, t]
+                    <= self.var[VarName.MAIN_VIRTUAL_LINE_FLOW][i, j, t],
+                    name=f'{ConstrName.MAIN_NO_VIRTUAL_ON_OPEN}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_VIRTUAL_LINE_FLOW][i, j, t]
+                    <= virtual_injection_m * self.var[VarName.MAIN_LINE_CONNECTED][i, j, t],
+                    name=f'{ConstrName.MAIN_NO_VIRTUAL_ON_OPEN}_R_{i}_{j}_{t}'
+                )
+
+        for t in self.data[DataName.LIST_TIME]:
+            self.add_constr(
+                pyo.quicksum(
+                    self.var[VarName.MAIN_LINE_CONNECTED][i, j, t]
+                    for (i, j) in self.data[DataName.LIST_LINE]
+                ) == len(self.data[DataName.LIST_NODE]) - pyo.quicksum(
+                    self.var[VarName.MAIN_VIRTUAL_SOURCE_INDICATOR][j, t] for j in self.data[DataName.LIST_NODE]
+                ),
+                name=f'{ConstrName.MAIN_RADIALITY}_{t}'
+            )
+
+        for j in self.data[DataName.LIST_NODE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    self.var[VarName.MAIN_DG_ACTIVE_POWER][j, t] <= self.var[VarName.DG_RATED_POWER][j],
+                    name=f'{ConstrName.MAIN_DG_ACTIVE_POWER_UB}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_DG_REACTIVE_POWER][j, t]
+                    <= self.data[DataName.DICT_DG_ALPHA_UB][j] * self.var[VarName.MAIN_DG_ACTIVE_POWER][j, t],
+                    name=f'{ConstrName.MAIN_DG_REACTIVE_POWER_UB}_{j}_{t}'
+                )
+
+        for j in self.data[DataName.LIST_NODE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    self.data[DataName.NUM_VOLTAGE_LB] <= self.var[VarName.MAIN_BUS_VOLTAGE][j, t],
+                    name=f'{ConstrName.MAIN_VOLTAGE_RANGE_C1}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_BUS_VOLTAGE][j, t] <= self.data[DataName.NUM_VOLTAGE_UB],
+                    name=f'{ConstrName.MAIN_VOLTAGE_RANGE_C2}_{j}_{t}'
+                )
+
+        for t in self.data[DataName.LIST_TIME]:
+            self.add_constr(
+                self.var[VarName.MAIN_BUS_VOLTAGE][self.data[DataName.SLACK_NODE_IDX], t] == self.data[DataName.NUM_VOLTAGE_SLACK],
+                name=f'{ConstrName.MAIN_VOLTAGE_SLACK_BUS}_{t}'
+            )
+
+        voltage_flow_m = self.data[DataName.NUM_TOTAL_POWER]
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            for t in self.data[DataName.LIST_TIME]:
+                v_drop_on_ij = (
+                    self.data[DataName.DICT_LINE_RESISTANCE][i, j] * self.var[VarName.MAIN_LINE_ACTIVE_FLOW][i, j, t]
+                    + self.data[DataName.DICT_LINE_REACTANCE][i, j] * self.var[VarName.MAIN_LINE_REACTIVE_FLOW][i, j, t]
+                )
+
+                self.add_constr(
+                    -voltage_flow_m * (1 - self.var[VarName.MAIN_LINE_CONNECTED][i, j, t])
+                    <= self.var[VarName.MAIN_BUS_VOLTAGE][i, t] - self.var[VarName.MAIN_BUS_VOLTAGE][j, t]
+                    - v_drop_on_ij / self.data[DataName.NUM_VOLTAGE_SLACK],
+                    name=f'{ConstrName.MAIN_VOLTAGE_FLOW_REL}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_BUS_VOLTAGE][i, t] - self.var[VarName.MAIN_BUS_VOLTAGE][j, t]
+                    - v_drop_on_ij / self.data[DataName.NUM_VOLTAGE_SLACK]
+                    <= voltage_flow_m * (1 - self.var[VarName.MAIN_LINE_CONNECTED][i, j, t]),
+                    name=f'{ConstrName.MAIN_VOLTAGE_FLOW_REL}_R_{i}_{j}_{t}'
+                )
+
+        for j in self.data[DataName.LIST_NODE]:
+            for t in self.data[DataName.LIST_TIME]:
+                self.add_constr(
+                    pyo.quicksum(
+                        self.var[VarName.MAIN_LINE_ACTIVE_FLOW][j, k, t]
+                        for k in self.data[DataName.DICT_NODE_CHILDREN][j]
+                    )
+                    - pyo.quicksum(
+                        self.var[VarName.MAIN_LINE_ACTIVE_FLOW][i, j, t]
+                        for i in self.data[DataName.DICT_NODE_PARENTS][j]
+                    )
+                    == self.var[VarName.MAIN_DG_ACTIVE_POWER][j, t]
+                    - (1 - self.var[VarName.MAIN_LOAD_SHED_RATIO][j, t]) * self.data[DataName.DICT_HAT_DEMAND_ACTIVE_BY_TIME][j, t],
+                    name=f'{ConstrName.MAIN_FLOW_BALANCE_C1}_{j}_{t}'
+                )
+
+                self.add_constr(
+                    pyo.quicksum(
+                        self.var[VarName.MAIN_LINE_REACTIVE_FLOW][j, k, t]
+                        for k in self.data[DataName.DICT_NODE_CHILDREN][j]
+                    )
+                    - pyo.quicksum(
+                        self.var[VarName.MAIN_LINE_REACTIVE_FLOW][i, j, t]
+                        for i in self.data[DataName.DICT_NODE_PARENTS][j]
+                    )
+                    == self.var[VarName.MAIN_DG_REACTIVE_POWER][j, t]
+                    - (1 - self.var[VarName.MAIN_LOAD_SHED_RATIO][j, t]) * self.data[DataName.DICT_HAT_DEMAND_REACTIVE_BY_TIME][j, t],
+                    name=f'{ConstrName.MAIN_FLOW_BALANCE_C2}_{j}_{t}'
+                )
+
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            for t in self.data[DataName.LIST_TIME]:
+                line_connected = self.var[VarName.MAIN_LINE_CONNECTED][i, j, t]
+                self.add_constr(
+                    -voltage_flow_m * line_connected <= self.var[VarName.MAIN_LINE_ACTIVE_FLOW][i, j, t],
+                    name=f'{ConstrName.MAIN_NO_FLOW_ON_OPEN_C1}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_LINE_ACTIVE_FLOW][i, j, t] <= voltage_flow_m * line_connected,
+                    name=f'{ConstrName.MAIN_NO_FLOW_ON_OPEN_C1}_R_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    -voltage_flow_m * line_connected <= self.var[VarName.MAIN_LINE_REACTIVE_FLOW][i, j, t],
+                    name=f'{ConstrName.MAIN_NO_FLOW_ON_OPEN_C2}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    self.var[VarName.MAIN_LINE_REACTIVE_FLOW][i, j, t] <= voltage_flow_m * line_connected,
+                    name=f'{ConstrName.MAIN_NO_FLOW_ON_OPEN_C2}_R_{i}_{j}_{t}'
+                )
+
+        sqrt3 = math.sqrt(3.0)
+        for (i, j) in self.data[DataName.LIST_LINE]:
+            thermal_ub = self.data[DataName.DICT_LINE_THERMAL_UB][i, j]
+            for t in self.data[DataName.LIST_TIME]:
+                p_flow = self.var[VarName.MAIN_LINE_ACTIVE_FLOW][i, j, t]
+                q_flow = self.var[VarName.MAIN_LINE_REACTIVE_FLOW][i, j, t]
+
+                self.add_constr(
+                    -2 * thermal_ub <= sqrt3 * p_flow + q_flow,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C1}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    sqrt3 * p_flow + q_flow <= 2 * thermal_ub,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C1}_R_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    -thermal_ub <= p_flow,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C2}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    p_flow <= thermal_ub,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C2}_R_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    -2 * thermal_ub <= sqrt3 * p_flow - q_flow,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C3}_L_{i}_{j}_{t}'
+                )
+                self.add_constr(
+                    sqrt3 * p_flow - q_flow <= 2 * thermal_ub,
+                    name=f'{ConstrName.MAIN_LINE_THERMAL_C3}_R_{i}_{j}_{t}'
+                )
+
     def set_added_obj_term_weight(self, weight):
         self.added_obj_term_weight = float(weight)
         if self.obj_term:
@@ -415,15 +727,31 @@ class ModelMain(ModelCombined):
             for s in self.data[DataName.LIST_SCENARIO]
         )
 
-        self.obj_term[ObjName.MAIN_APPROX_DG_GENERATING_COST] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.MAIN_DG_ACTIVE_POWER][j]
-            for j in self.data[DataName.LIST_NODE]
-        )
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_NO_TIME:
+            self.obj_term[ObjName.MAIN_APPROX_DG_GENERATING_COST] = pyo.quicksum(
+                self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.MAIN_DG_ACTIVE_POWER][j]
+                for j in self.data[DataName.LIST_NODE]
+            )
 
-        self.obj_term[ObjName.MAIN_APPROX_LOAD_SHED_COST] = pyo.quicksum(
-            self.data[DataName.NUM_COST_SHED] * self.var[VarName.MAIN_LOAD_SHED_RATIO][j]
-            for j in self.data[DataName.LIST_NODE]
-        )
+            self.obj_term[ObjName.MAIN_APPROX_LOAD_SHED_COST] = pyo.quicksum(
+                self.data[DataName.NUM_COST_SHED] * self.var[VarName.MAIN_LOAD_SHED_RATIO][j]
+                for j in self.data[DataName.LIST_NODE]
+            )
+        elif self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_BY_TIME:
+            self.obj_term[ObjName.MAIN_APPROX_DG_GENERATING_COST] = pyo.quicksum(
+                self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.MAIN_DG_ACTIVE_POWER][j, t]
+                for j in self.data[DataName.LIST_NODE]
+                for t in self.data[DataName.LIST_TIME]
+            )
+
+            self.obj_term[ObjName.MAIN_APPROX_LOAD_SHED_COST] = pyo.quicksum(
+                self.data[DataName.NUM_COST_SHED] * self.var[VarName.MAIN_LOAD_SHED_RATIO][j, t]
+                for j in self.data[DataName.LIST_NODE]
+                for t in self.data[DataName.LIST_TIME]
+            )
+        else:
+            self.obj_term[ObjName.MAIN_APPROX_DG_GENERATING_COST] = 0.0
+            self.obj_term[ObjName.MAIN_APPROX_LOAD_SHED_COST] = 0.0
 
         self.set_objective(
             self.obj_term[ObjName.DG_FIXED_COST]

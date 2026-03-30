@@ -17,7 +17,7 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 from util.project_logger import init_logger
-from util.names import VarName, InputMethodName, MainProblemHatDataMethodName
+from util.names import VarName, InputMethodName, MainProblemHatDataMethodName, MainProblemModelTypeName
 from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
@@ -349,6 +349,7 @@ def run_decomp_module_test(
     reference_solution_path: Optional[str] = None,
     record_incumbent_every_k: Optional[int] = None,
     use_aggregated_cuts: bool = False,
+    main_problem_model_type: str = MainProblemModelTypeName.COLLAPSED_NO_TIME,
     main_problem_hat_data_method: str = MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
     added_obj_term_weight: float = 0.0,
     phase_1_added_obj_term_weight: Optional[float] = None,
@@ -409,6 +410,7 @@ def run_decomp_module_test(
         time_list=time_list,
         scenario_list=scenario_list,
     )
+    two_stage_decomp_module.data_processor_module.main_problem_model_type = main_problem_model_type
     two_stage_decomp_module.data_processor_module.main_problem_hat_data_method = main_problem_hat_data_method
 
     two_stage_decomp_module.build_main_stage_model()
@@ -784,6 +786,7 @@ def run_decomp_module_test(
             "reference_solution_path": reference_solution_path,
             "record_incumbent_every_k": record_incumbent_every_k,
             "use_aggregated_cuts": use_aggregated_cuts,
+            "main_problem_model_type": main_problem_model_type,
             "main_problem_hat_data_method": main_problem_hat_data_method,
             "added_obj_term_weight": added_obj_term_weight,
             "phase_1_added_obj_term_weight": phase_1_added_obj_term_weight,
@@ -853,6 +856,7 @@ if __name__ == "__main__":
         # ),
         record_incumbent_every_k=2,
         use_aggregated_cuts=False,
+        main_problem_model_type=MainProblemModelTypeName.COLLAPSED_BY_TIME,
         added_obj_term_weight=1.0,
         phase_1_added_obj_term_weight=None,
         phase_2_added_obj_term_weight=None,

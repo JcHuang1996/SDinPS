@@ -16,7 +16,7 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 from util.project_logger import init_logger
-from util.names import VarName, InputMethodName, MainProblemHatDataMethodName
+from util.names import VarName, InputMethodName, MainProblemHatDataMethodName, MainProblemModelTypeName
 from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
@@ -66,6 +66,7 @@ def run_decomp_module_test(
     integer_opt_cut_iter_range: Optional[Tuple[int, int]] = None,
     record_incumbent_every_k: Optional[int] = None,
     use_aggregated_cuts: bool = False,
+    main_problem_model_type: str = MainProblemModelTypeName.COLLAPSED_NO_TIME,
     main_problem_hat_data_method: str = MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
     added_obj_term_weight: float = 0.0,
 ):
@@ -92,6 +93,7 @@ def run_decomp_module_test(
         use_aggregated_cuts: If False, generate and add one cut per scenario group (sub_sce_list). If True,
             collect (lhs, rhs, weight) for each group with weight = sum of scenario probabilities, then add
             exactly one cut per iteration per cut type using probability-weighted lhs and rhs.
+        main_problem_model_type: Selected main-problem model variant.
         main_problem_hat_data_method: Method used to collapse time/scenario-dependent data for the enriched main model.
         added_obj_term_weight: Scalar weight of the added master-only operating objective terms.
     """
@@ -162,6 +164,7 @@ def run_decomp_module_test(
         time_list=time_list,
         scenario_list=scenario_list,
     )
+    two_stage_decomp_module.data_processor_module.main_problem_model_type = main_problem_model_type
     two_stage_decomp_module.data_processor_module.main_problem_hat_data_method = main_problem_hat_data_method
 
     # build main model
@@ -324,6 +327,7 @@ def run_decomp_module_test(
             "integer_opt_cut_iter_range": integer_opt_cut_iter_range,
             "record_incumbent_every_k": record_incumbent_every_k,
             "use_aggregated_cuts": use_aggregated_cuts,
+            "main_problem_model_type": main_problem_model_type,
             "main_problem_hat_data_method": main_problem_hat_data_method,
             "added_obj_term_weight": added_obj_term_weight,
         },
@@ -383,6 +387,7 @@ if __name__ == "__main__":
         # cglp_cut_iter_range=(0, _max_iter - 1),
         record_incumbent_every_k=2,
         use_aggregated_cuts=False,
+        main_problem_model_type=MainProblemModelTypeName.COLLAPSED_NO_TIME,
         main_problem_hat_data_method=MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
         added_obj_term_weight= 2.0,
     )

@@ -26,6 +26,9 @@ class DataProcessor:
         # the processed data, ready to be used in later model
         self.data = {}
 
+        # selected main-problem model variant
+        self.main_problem_model_type = MainProblemModelTypeName.COLLAPSED_NO_TIME
+
         # method used to collapse t,s-dependent data for the enriched main problem
         self.main_problem_hat_data_method = MainProblemHatDataMethodName.WEIGHTED_AVERAGE
 
@@ -377,7 +380,26 @@ class DataProcessor:
 
     def generate_main_problem_hat_data(self):
         """
-        Generate collapsed data for the enriched main problem by removing the time / scenario dimensions.
+        Generate collapsed data required by the selected main-problem variant.
+        """
+        self.data[DataName.MAIN_PROBLEM_MODEL_TYPE] = self.main_problem_model_type
+
+        if self.main_problem_model_type == MainProblemModelTypeName.BASE:
+            return
+
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_NO_TIME:
+            self._generate_main_problem_hat_data_no_time()
+            return
+
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_BY_TIME:
+            self._generate_main_problem_hat_data_by_time()
+            return
+
+        raise ValueError(f'Unsupported main_problem_model_type: {self.main_problem_model_type}')
+
+    def _generate_main_problem_hat_data_no_time(self):
+        """
+        Generate collapsed data for the main problem by removing both time and scenario dimensions.
         """
 
         prob_dict = self.data[DataName.DICT_SC_PROB]
@@ -434,6 +456,60 @@ class DataProcessor:
             self.data[DataName.DICT_HAT_LINE_HEALTHY_H][i, j] = _collapse_binary(
                 lambda t, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_H][line_i, line_j, t, s]
             )
+
+    def _generate_main_problem_hat_data_by_time(self):
+        """
+        Generate collapsed data for the main problem by removing only the scenario dimension.
+        """
+
+        method = self.main_problem_hat_data_method
+        if method != MainProblemHatDataMethodName.WEIGHTED_AVERAGE:
+            raise ValueError(
+                'collapsed_by_time main problem only supports '
+                f'{MainProblemHatDataMethodName.WEIGHTED_AVERAGE}, got {method}'
+            )
+
+        prob_dict = self.data[DataName.DICT_SC_PROB]
+        time_list = self.data[DataName.LIST_TIME]
+        node_list = self.data[DataName.LIST_NODE]
+        line_list = self.data[DataName.LIST_LINE]
+        scenario_list = self.data[DataName.LIST_SCENARIO]
+
+        self.data[DataName.DICT_HAT_DEMAND_ACTIVE_BY_TIME] = {}
+        self.data[DataName.DICT_HAT_DEMAND_REACTIVE_BY_TIME] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_NH_BY_TIME] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_TIME] = {}
+
+        def _collapse_continuous_at_time(value_getter, time_idx):
+            return sum(
+                prob_dict[s] * value_getter(time_idx, s)
+                for s in scenario_list
+            )
+
+        def _collapse_binary_at_time(value_getter, time_idx):
+            return int(_collapse_continuous_at_time(value_getter, time_idx) >= 0.5)
+
+        for j in node_list:
+            for t in time_list:
+                self.data[DataName.DICT_HAT_DEMAND_ACTIVE_BY_TIME][j, t] = _collapse_continuous_at_time(
+                    lambda time_idx, s, node=j: self.data[DataName.DICT_DEMAND_ACTIVE][node, time_idx, s],
+                    t,
+                )
+                self.data[DataName.DICT_HAT_DEMAND_REACTIVE_BY_TIME][j, t] = _collapse_continuous_at_time(
+                    lambda time_idx, s, node=j: self.data[DataName.DICT_DEMAND_REACTIVE][node, time_idx, s],
+                    t,
+                )
+
+        for (i, j) in line_list:
+            for t in time_list:
+                self.data[DataName.DICT_HAT_LINE_HEALTHY_NH_BY_TIME][i, j, t] = _collapse_binary_at_time(
+                    lambda time_idx, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_NH][line_i, line_j, time_idx, s],
+                    t,
+                )
+                self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_TIME][i, j, t] = _collapse_binary_at_time(
+                    lambda time_idx, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_H][line_i, line_j, time_idx, s],
+                    t,
+                )
 
 
 if __name__ == "__main__":
