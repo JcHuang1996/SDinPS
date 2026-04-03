@@ -178,15 +178,25 @@ def run_decomp_module_test(
         hat=0.3334
     )
 
-    true_sum_above_value = sum(true_sum_above.values())
-    true_sum_below_value = sum(true_sum_below.values())
-
-    two_stage_decomp_module.model_main.set_pretrained_cut(
-        above_var=true_keys_above,
-        below_var=true_keys_below,
-        above_sum=true_sum_above_value,
-        below_sum=true_sum_below_value,
-    )
+    if (
+        true_keys_above is not None
+        and true_keys_below is not None
+        and true_sum_above is not None
+        and true_sum_below is not None
+    ):
+        true_sum_above_value = sum(true_sum_above.values())
+        true_sum_below_value = sum(true_sum_below.values())
+        two_stage_decomp_module.model_main.set_pretrained_cut(
+            above_var=true_keys_above,
+            below_var=true_keys_below,
+            above_sum=true_sum_above_value,
+            below_sum=true_sum_below_value,
+        )
+    else:
+        logger.info(
+            "Skipping pretrained cut because no combined scenario solution was found for %s.",
+            scenario_list,
+        )
 
     # decide how to group and iterate the scenarios
     sce_group_list = [

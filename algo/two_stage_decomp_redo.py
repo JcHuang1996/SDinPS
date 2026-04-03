@@ -81,7 +81,7 @@ class TwoStageDecompRedo:
         # return the optimal value of the solved main model
         self.model_main.set_parameters(
             param_dict={
-                'TimeLimit': 60
+                'TimeLimit':120
             }
         )
         self.model_main.solve()

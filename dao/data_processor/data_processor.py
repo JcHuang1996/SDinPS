@@ -395,6 +395,10 @@ class DataProcessor:
             self._generate_main_problem_hat_data_by_time()
             return
 
+        if self.main_problem_model_type == MainProblemModelTypeName.COLLAPSED_BY_SCENARIOS:
+            self._generate_main_problem_hat_data_by_scenario()
+            return
+
         raise ValueError(f'Unsupported main_problem_model_type: {self.main_problem_model_type}')
 
     def _generate_main_problem_hat_data_no_time(self):
@@ -509,6 +513,64 @@ class DataProcessor:
                 self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_TIME][i, j, t] = _collapse_binary_at_time(
                     lambda time_idx, s, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_H][line_i, line_j, time_idx, s],
                     t,
+                )
+
+    def _generate_main_problem_hat_data_by_scenario(self):
+        """
+        Generate collapsed data for the main problem by removing only the time dimension.
+        """
+
+        method = self.main_problem_hat_data_method
+        if method != MainProblemHatDataMethodName.WEIGHTED_AVERAGE:
+            raise ValueError(
+                'collapsed_by_scenarios main problem only supports '
+                f'{MainProblemHatDataMethodName.WEIGHTED_AVERAGE}, got {method}'
+            )
+
+        time_list = self.data[DataName.LIST_TIME]
+        node_list = self.data[DataName.LIST_NODE]
+        line_list = self.data[DataName.LIST_LINE]
+        scenario_list = self.data[DataName.LIST_SCENARIO]
+
+        if not time_list:
+            raise ValueError('LIST_TIME cannot be empty when generating scenario-indexed main-problem data.')
+
+        time_count = len(time_list)
+
+        self.data[DataName.DICT_HAT_DEMAND_ACTIVE_BY_SCENARIO] = {}
+        self.data[DataName.DICT_HAT_DEMAND_REACTIVE_BY_SCENARIO] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_NH_BY_SCENARIO] = {}
+        self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_SCENARIO] = {}
+
+        def _collapse_continuous_at_scenario(value_getter, scenario_idx):
+            return sum(
+                value_getter(t, scenario_idx)
+                for t in time_list
+            ) / time_count
+
+        def _collapse_binary_at_scenario(value_getter, scenario_idx):
+            return int(_collapse_continuous_at_scenario(value_getter, scenario_idx) >= 0.5)
+
+        for j in node_list:
+            for s in scenario_list:
+                self.data[DataName.DICT_HAT_DEMAND_ACTIVE_BY_SCENARIO][j, s] = _collapse_continuous_at_scenario(
+                    lambda time_idx, scenario_idx, node=j: self.data[DataName.DICT_DEMAND_ACTIVE][node, time_idx, scenario_idx],
+                    s,
+                )
+                self.data[DataName.DICT_HAT_DEMAND_REACTIVE_BY_SCENARIO][j, s] = _collapse_continuous_at_scenario(
+                    lambda time_idx, scenario_idx, node=j: self.data[DataName.DICT_DEMAND_REACTIVE][node, time_idx, scenario_idx],
+                    s,
+                )
+
+        for (i, j) in line_list:
+            for s in scenario_list:
+                self.data[DataName.DICT_HAT_LINE_HEALTHY_NH_BY_SCENARIO][i, j, s] = _collapse_binary_at_scenario(
+                    lambda time_idx, scenario_idx, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_NH][line_i, line_j, time_idx, scenario_idx],
+                    s,
+                )
+                self.data[DataName.DICT_HAT_LINE_HEALTHY_H_BY_SCENARIO][i, j, s] = _collapse_binary_at_scenario(
+                    lambda time_idx, scenario_idx, line_i=i, line_j=j: self.data[DataName.DICT_LINE_HEALTHY_H][line_i, line_j, time_idx, scenario_idx],
+                    s,
                 )
 
 

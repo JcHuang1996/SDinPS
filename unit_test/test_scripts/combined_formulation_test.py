@@ -74,7 +74,8 @@ def run_combined_formulation_test(
 
     m_combined.set_parameters(
         param_dict={
-            'MIPGap': 0.01
+            'MIPGap': 0.01,
+            'TimeLimit': 600,
         }
     )
 

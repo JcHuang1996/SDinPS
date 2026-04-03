@@ -423,15 +423,29 @@ def run_decomp_module_test(
         hat=0.3334
     )
 
-    true_sum_above_value = sum(true_sum_above.values())
-    true_sum_below_value = sum(true_sum_below.values())
-
-    two_stage_decomp_module.model_main.set_pretrained_cut(
-        above_var=true_keys_above,
-        below_var=true_keys_below,
-        above_sum=true_sum_above_value,
-        below_sum=true_sum_below_value,
-    )
+    if (
+        true_keys_above is not None
+        and true_keys_below is not None
+        and true_sum_above is not None
+        and true_sum_below is not None
+    ):
+        true_sum_above_value = sum(true_sum_above.values())
+        true_sum_below_value = sum(true_sum_below.values())
+        two_stage_decomp_module.model_main.set_pretrained_cut(
+            above_var=true_keys_above,
+            below_var=true_keys_below,
+            above_sum=true_sum_above_value,
+            below_sum=true_sum_below_value,
+        )
+    else:
+        sum_above_value = sum(sum_above.values())
+        sum_below_value = sum(sum_below.values())
+        two_stage_decomp_module.model_main.set_pretrained_cut(
+            above_var=keys_above,
+            below_var=keys_below,
+            above_sum=sum_above_value,
+            below_sum=sum_below_value,
+        )
 
     sce_group_list = [[s] for s in scenario_list]
 
@@ -824,7 +838,7 @@ def run_decomp_module_test(
     plot_iter_obj_curves(
         ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
         output_dir=output_dir,
-        real_objective_value=3239346
+        real_objective_value=3822465
     )
     return {
         "repetitive_cut_count": len(repetitive_cut_records),
@@ -835,18 +849,21 @@ def run_decomp_module_test(
 if __name__ == "__main__":
     _max_iter = 55
     _phase_1_end = 0
-    _phase_2_end = _max_iter - 5
+    _phase_2_end = _max_iter - 4
     _phase_3_end = _max_iter - 1
     run_decomp_module_test(
         enable_log_output=False,
         enable_result_output=True,
         scenario_list=['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
+        # scenario_list=['s_3'],
+        # scenario_list=['s_1', 's_2', 's_3'],
         time_list=None,
         test_read_method=None,
         test_file_path=None,
         data_set_name='function_test_fixed_rated_p',
+        # data_set_name='IEEE123bus',
         max_iterations=_max_iter,
-        output_label='dynamic_algorithm_new_m',
+        output_label='new_m_agg_t',
         phase_1_end_iteration=_phase_1_end,
         phase_2_end_iteration=_phase_2_end,
         phase_3_end_iteration=_phase_3_end,
@@ -856,7 +873,7 @@ if __name__ == "__main__":
         # ),
         record_incumbent_every_k=2,
         use_aggregated_cuts=False,
-        main_problem_model_type=MainProblemModelTypeName.COLLAPSED_BY_TIME,
+        main_problem_model_type=MainProblemModelTypeName.COLLAPSED_BY_SCENARIOS,
         added_obj_term_weight=1.0,
         phase_1_added_obj_term_weight=None,
         phase_2_added_obj_term_weight=None,

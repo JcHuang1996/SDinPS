@@ -145,17 +145,17 @@ def record_solution(
 
 if __name__ == "__main__":
     # Example usage
-    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test_fixed_rated_p'
+    dataset_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/IEEE123bus'
     s_list_list = [
-        ['s_1'],
-        ['s_2'],
+        # ['s_1'],
+        # ['s_2'],
         ['s_3'],
-        ['s_4'],
-        ['s_5'],
-        ['s_6'],
-        ['s_1', 's_2', 's_3'],
-        ['s_1', 's_3', 's_5'],
-        ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
+        # ['s_4'],
+        # ['s_5'],
+        # ['s_6'],
+        # ['s_1', 's_2', 's_3'],
+        # ['s_1', 's_3', 's_5'],
+        # ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6'],
     ]
     for s_list in s_list_list:
         record_solution(dataset_path=dataset_path, scenario_list=s_list)

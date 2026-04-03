@@ -39,6 +39,7 @@ class MainProblemModelTypeName:
     BASE = 'base'
     COLLAPSED_NO_TIME = 'collapsed_no_time'
     COLLAPSED_BY_TIME = 'collapsed_by_time'
+    COLLAPSED_BY_SCENARIOS = 'collapsed_by_scenarios'
 
 
 class InputDataName:
@@ -100,6 +101,10 @@ class DataName:
     DICT_HAT_DEMAND_REACTIVE_BY_TIME = 'dict_hat_demand_reactive_by_time'  # dict, {(j,t): float, ...}, scenario-collapsed reactive demand by time for main problem
     DICT_HAT_LINE_HEALTHY_NH_BY_TIME = 'dict_hat_line_healthy_n_harden_by_time'  # dict, {(i,j,t): status_binary, ...}, scenario-collapsed non-hardened line health by time for main problem
     DICT_HAT_LINE_HEALTHY_H_BY_TIME = 'dict_hat_line_healthy_harden_by_time'  # dict, {(i,j,t): status_binary, ...}, scenario-collapsed hardened line health by time for main problem
+    DICT_HAT_DEMAND_ACTIVE_BY_SCENARIO = 'dict_hat_demand_active_by_scenario'  # dict, {(j,s): float, ...}, time-collapsed active demand by scenario for main problem
+    DICT_HAT_DEMAND_REACTIVE_BY_SCENARIO = 'dict_hat_demand_reactive_by_scenario'  # dict, {(j,s): float, ...}, time-collapsed reactive demand by scenario for main problem
+    DICT_HAT_LINE_HEALTHY_NH_BY_SCENARIO = 'dict_hat_line_healthy_n_harden_by_scenario'  # dict, {(i,j,s): status_binary, ...}, time-collapsed non-hardened line health by scenario for main problem
+    DICT_HAT_LINE_HEALTHY_H_BY_SCENARIO = 'dict_hat_line_healthy_harden_by_scenario'  # dict, {(i,j,s): status_binary, ...}, time-collapsed hardened line health by scenario for main problem
     NUM_COST_SHED = 'cost_shed'                         # float, cost of load shedding. AFN: C^{L} key: c_load_shed
     #
     # # Important values and coefficient
