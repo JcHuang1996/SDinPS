@@ -104,5 +104,6 @@ but **do not** add heavy new dependencies to make this happen.
 ## What to do when requirements are unclear
 Make the smallest reasonable assumption consistent with existing code.
 If ambiguity affects correctness (e.g., model semantics, indexing, cost definition), ask a targeted question and propose two options with minimal diffs.
+Always assume the correctness of the Markdown documentations in this project are unverified, unless the user clearly points out one or a few certain documentation(s) to read and/or understand.
 
 End of instructions.
