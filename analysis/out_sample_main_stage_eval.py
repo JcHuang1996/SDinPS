@@ -264,7 +264,6 @@ def evaluate_one_sample(
         scenario_list_assigned=[scenario_id],
         time_list_assigned=sample_time_list,
     )
-    data_processor.clear_existing_data()
 
     sub_model = ModelSub(
         model_name=f"sample_eval_{scenario_id}",

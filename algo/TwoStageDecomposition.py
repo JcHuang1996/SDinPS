@@ -65,7 +65,6 @@ class TwoStageDecomposition:
             scenario_list_assigned=self.scenario_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         self.sce_prob_dict = self.main_model_data[DataName.DICT_SC_PROB].copy()
 
@@ -117,7 +116,6 @@ class TwoStageDecomposition:
             scenario_list_assigned=sub_model_sce_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         # ============================
         # build and solve sub problem models
@@ -204,7 +202,6 @@ class TwoStageDecomposition:
             scenario_list_assigned=sub_model_sce_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         model_est = ModelCombined(model_name='m_est', model_data=sub_model_data)
 
@@ -258,7 +255,6 @@ class TwoStageDecomposition:
             scenario_list_assigned=sub_model_sce_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         # build the corresponding sub model for estimating
         model_est = ModelCombined(model_name='m_est', model_data=sub_model_data)
@@ -440,7 +436,6 @@ class TwoStageDecomposition:
             scenario_list_assigned=sub_model_sce_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         # only fix the bi-var to be one
         bi_to_fix_info = {

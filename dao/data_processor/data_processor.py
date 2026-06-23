@@ -37,9 +37,19 @@ class DataProcessor:
         # clear the processed data to generate a new data set
         self.data = {}
 
+    def static_data_process(self):
+        """
+        Process data that is independent of selected scenarios and time periods.
+        The function writes the output directly into self.data.
+        """
+        self.node_data()
+        self.line_data()
+        self.equipment_data()
+        self.parameter_data()
+
     def scenario_time_specific_data_process(self, scenario_list_assigned=None, time_list_assigned=None):
 
-        logger.info(f'Processing data for specific scenarios and times')
+        logger.info(f'Processing scenario/time data')
         logger.info(f'Scenarios: {scenario_list_assigned}')
         logger.info(f'Times: {time_list_assigned}')
 
@@ -49,24 +59,12 @@ class DataProcessor:
 
         logger.info(f'Data processing starts')
 
-        self.node_data()
-        self.line_data()
-        self.node_data()
-        self.equipment_data()
-        self.scenario_data()
-        self.parameter_data()
-
-        if scenario_list_assigned is not None or time_list_assigned is not None:
-
-            logger.info(f'Processing data for specific scenarios and times')
-            logger.info(f'Scenarios: {scenario_list_assigned}')
-            logger.info(f'Times: {time_list_assigned}')
-            self.scenario_data(scenario_list_assigned=scenario_list_assigned, time_list_assigned=time_list_assigned)
-
-        else:
-            logger.info('Processing data for all scenarios and times')
-            self.scenario_data()
-
+        self.data = {}
+        self.static_data_process()
+        self.scenario_time_specific_data_process(
+            scenario_list_assigned=scenario_list_assigned,
+            time_list_assigned=time_list_assigned,
+        )
         self.logic_process_data()
         self.generate_main_problem_hat_data()
 
@@ -185,7 +183,6 @@ class DataProcessor:
         dict_parameter = self.raw_data[InputDataName.PARAMETERS_DICT].copy()
 
         self.data[DataName.DICT_LINE_COST_HARDEN], self.data[DataName.DICT_LINE_THERMAL_UB] = {}, {}
-        self.data[DataName.DICT_LINE_COST_HARDEN], self.data[DataName.DICT_LINE_THERMAL_UB] = {}, {}
 
         for _, row in df_branch.iterrows():
             i = row[BranchHeader.FROM_NODE]
@@ -268,23 +265,33 @@ class DataProcessor:
                 list(self.raw_data[InputDataName.SCENARIO_PROB_DF][ScenarioProbHeader.SCENARIO_ID])
             )
         else:
-            self.data[DataName.LIST_SCENARIO] = scenario_list_assigned
+            self.data[DataName.LIST_SCENARIO] = list(scenario_list_assigned)
 
         df_s_prob = self.raw_data[InputDataName.SCENARIO_PROB_DF][
             self.raw_data[InputDataName.SCENARIO_PROB_DF][ScenarioProbHeader.SCENARIO_ID].isin(self.data[DataName.LIST_SCENARIO])
         ].copy()
 
-        # check: sum of probability of all scenarios != 1
-        if 0.99 <= df_s_prob[ScenarioProbHeader.SCENARIO_PROB].sum() <= 1.01:
-            pass
-        else:   # if sum of probability != 1, unify it
-            df_s_prob[ScenarioProbHeader.SCENARIO_PROB] = \
-                    df_s_prob[ScenarioProbHeader.SCENARIO_PROB] / df_s_prob[ScenarioProbHeader.SCENARIO_PROB].sum()
+        prob_by_scenario = df_s_prob.set_index(
+            [ScenarioProbHeader.SCENARIO_ID]
+        )[ScenarioProbHeader.SCENARIO_PROB].to_dict()
+        missing_scenarios = [
+            s for s in self.data[DataName.LIST_SCENARIO]
+            if s not in prob_by_scenario
+        ]
+        if missing_scenarios:
+            raise ValueError(f'Missing scenario probability for scenarios: {missing_scenarios}')
 
-            # logger.warning('Warning: Incorrect scenario probability, auto unified')
+        prob_sum = sum(prob_by_scenario[s] for s in self.data[DataName.LIST_SCENARIO])
+        if prob_sum <= 0:
+            raise ValueError('Scenario probabilities must have a positive sum.')
 
-        self.data[DataName.DICT_SC_PROB] = \
-            df_s_prob.set_index([ScenarioProbHeader.SCENARIO_ID])[ScenarioProbHeader.SCENARIO_PROB].to_dict()
+        # Probabilities are normalized over the selected scenario subset.
+        # A single-scenario subproblem is therefore treated as conditional on that scenario,
+        # while a main model processed with the full scenario list keeps the full distribution.
+        self.data[DataName.DICT_SC_PROB] = {
+            s: prob_by_scenario[s] / prob_sum
+            for s in self.data[DataName.LIST_SCENARIO]
+        }
 
         # ========================================
         # process data from s_line_state_w_o_harden.csv:
@@ -299,11 +306,12 @@ class DataProcessor:
                 self.raw_data[InputDataName.SCENARIO_LINE_STATE_WO_HARDEN_DF][ScenarioLineStateHeader.TIME_IDX].unique().tolist()
             )
         else:
-            self.data[DataName.LIST_TIME] = time_list_assigned
+            self.data[DataName.LIST_TIME] = list(time_list_assigned)
 
         df_s_line_state = \
             self.raw_data[InputDataName.SCENARIO_LINE_STATE_WO_HARDEN_DF][
                 self.raw_data[InputDataName.SCENARIO_LINE_STATE_WO_HARDEN_DF][ScenarioLineStateHeader.TIME_IDX].isin(self.data[DataName.LIST_TIME])
+                & self.raw_data[InputDataName.SCENARIO_LINE_STATE_WO_HARDEN_DF][ScenarioLineStateHeader.SCENARIO_ID].isin(self.data[DataName.LIST_SCENARIO])
             ].copy()
 
         self.data[DataName.DICT_LINE_HEALTHY_H] = df_s_line_state.set_index(
@@ -368,15 +376,36 @@ class DataProcessor:
         # value: the sum of all p-load of the system
         # ====================
 
-        df_node = self.raw_data[InputDataName.NODE_DF].copy()
-        # self.data[DataName.NUM_TOTAL_POWER] = df_node[NodeHeader.P_LOAD].sum()
-        self.data[DataName.NUM_TOTAL_POWER] = 1.5
+        dict_parameter = self.raw_data[InputDataName.PARAMETERS_DICT].copy()
+        if ParameterKey.TOTAL_POWER in dict_parameter:
+            self.data[DataName.NUM_TOTAL_POWER] = dict_parameter[ParameterKey.TOTAL_POWER]
+        else:
+            self.data[DataName.NUM_TOTAL_POWER] = self._calculate_total_power_from_selected_demand()
 
         # # ====================
         # # compute NUM_RATED_POWER_UB, the big-M for DG operation constraints
         # # value: TBD
         # # ====================
         # self.data[DataName.NUM_RATED_POWER_UB] = 1.75
+
+    def _calculate_total_power_from_selected_demand(self):
+        """
+        Calculate the active-power big-M from the processed scenario/time subset.
+        """
+        if DataName.DICT_DEMAND_ACTIVE not in self.data:
+            df_node = self.raw_data[InputDataName.NODE_DF].copy()
+            return df_node[NodeHeader.P_LOAD].sum()
+
+        max_total_power = 0
+        for t in self.data[DataName.LIST_TIME]:
+            for s in self.data[DataName.LIST_SCENARIO]:
+                total_power = sum(
+                    self.data[DataName.DICT_DEMAND_ACTIVE][j, t, s]
+                    for j in self.data[DataName.LIST_NODE]
+                )
+                max_total_power = max(max_total_power, total_power)
+
+        return max_total_power
 
     def generate_main_problem_hat_data(self):
         """

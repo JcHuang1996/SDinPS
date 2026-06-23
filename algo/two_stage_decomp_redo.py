@@ -65,7 +65,6 @@ class TwoStageDecompRedo:
             scenario_list_assigned=self.scenario_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         self.sce_prob_dict = self.main_model_data[DataName.DICT_SC_PROB].copy()
 
@@ -125,7 +124,6 @@ class TwoStageDecompRedo:
             scenario_list_assigned=sub_model_sce_list,
             time_list_assigned=self.time_list
         )
-        self.data_processor_module.clear_existing_data()
 
         # ============================
         # build and solve sub problem models
@@ -159,7 +157,6 @@ class TwoStageDecompRedo:
                 scenario_list_assigned=sub_model_sce_list,
                 time_list_assigned=self.time_list
             )
-            self.data_processor_module.clear_existing_data()
             self.sub_model_data_dict[sce_dict_key] = sub_model_data
         else:
             sub_model_data = self.sub_model_data_dict[sce_dict_key]
@@ -196,7 +193,6 @@ class TwoStageDecompRedo:
                 scenario_list_assigned=sub_model_sce_list,
                 time_list_assigned=self.time_list
             )
-            self.data_processor_module.clear_existing_data()
             self.sub_model_data_dict[sce_dict_key] = sub_model_data
         else:
             sub_model_data = self.sub_model_data_dict[sce_dict_key]
@@ -626,8 +622,6 @@ class TwoStageDecompRedo:
     #         scenario_list_assigned=sub_model_sce_list,
     #         time_list_assigned=self.time_list
     #     )
-    #     self.data_processor_module.clear_existing_data()
-    #
     #     lagrangian_cut_model = ModelLagrangianCutDeterministic(
     #         model_name=f'{tuple(sub_model_sce_list)}_lcdm',
     #         model_data=sub_model_data,
