@@ -9,5 +9,6 @@ from .model_cglp import ModelCGLP
 from .model_main import ModelMain
 from .model_sub import ModelSub
 from .model_lagrangian import ModelLagrangianMultiplierHeuristic, ModelInnerMinimizationProblem, PSInnerMinimizationProblem
+from .solver_config import SolverConfig
 
-__all__ = ["ModelCombined", "ModelCGLP", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "PSInnerMinimizationProblem"]
+__all__ = ["ModelCombined", "ModelCGLP", "ModelMain", "ModelSub", "ModelLagrangianMultiplierHeuristic", "ModelInnerMinimizationProblem", "PSInnerMinimizationProblem", "SolverConfig"]

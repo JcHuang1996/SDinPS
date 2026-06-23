@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 
 class ModelSub(ModelCombined):
 
-    def __init__(self, model_name='default_m', model_data=None, main_result=None, sub_model_sce_list=None):
-        super().__init__(model_name=model_name, model_data=model_data)
+    def __init__(self, model_name='default_m', model_data=None, main_result=None, sub_model_sce_list=None,
+                 solver_config=None):
+        super().__init__(model_name=model_name, model_data=model_data, solver_config=solver_config)
 
         self.main_result = main_result
 
@@ -130,7 +131,11 @@ class ModelSub(ModelCombined):
 
         self.model_relax.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 
-        self._last_results_relax = self.solver.solve(self.model_relax, tee=True, load_solutions=True)
+        self._last_results_relax = self._solve_model(
+            self.model_relax,
+            use_config_defaults=True,
+            load_solutions=True
+        )
 
     def benders_opt_cut_info_generator(self):
         """

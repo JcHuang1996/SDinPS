@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 class ModelMain(ModelCombined):
 
-    def __init__(self, model_name='default_m', model_data=None):
-        super().__init__(model_name=model_name, model_data=model_data)
+    def __init__(self, model_name='default_m', model_data=None, solver_config=None):
+        super().__init__(model_name=model_name, model_data=model_data, solver_config=solver_config)
 
         self.added_obj_term_weight = 0.0
         self.main_problem_model_type = (

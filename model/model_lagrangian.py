@@ -37,8 +37,8 @@ class ModelInnerMinimizationProblem(ModelBase):
 
     def __init__(self, model_name='default_m', model_data=None, main_result=None,
                  constr_dual_info=None, constr_var_map=None,
-                 build_fn=None, sub_obj_fn=None):
-        super().__init__(model_name=model_name, model_data=model_data)
+                 build_fn=None, sub_obj_fn=None, solver_config=None):
+        super().__init__(model_name=model_name, model_data=model_data, solver_config=solver_config)
 
         self.main_result = main_result
 
@@ -139,8 +139,9 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
     generate the Lagrangian cut.
     """
 
-    def __init__(self, model_name='default_m', main_result=None, constr_dual_info=None, constr_var_map=None):
-        super().__init__(model_name=model_name)
+    def __init__(self, model_name='default_m', main_result=None, constr_dual_info=None, constr_var_map=None,
+                 solver_config=None):
+        super().__init__(model_name=model_name, solver_config=solver_config)
 
         self.main_result = main_result          # the prefixed y's value in model (15) in the reference
 

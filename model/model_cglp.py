@@ -33,8 +33,9 @@ class ModelCGLP(ModelBase):
         lower_bound_rows,
         model_name='cglp',
         exact_point_data=None,
+        solver_config=None,
     ):
-        super().__init__(model_name=model_name)
+        super().__init__(model_name=model_name, solver_config=solver_config)
 
         self.main_model = main_model
         self.x_var_keys = list(x_var_keys)

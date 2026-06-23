@@ -7,6 +7,7 @@
 from util.headers import *
 from util.names import *
 from util.project_logger import init_logger
+from model.solver_config import SolverConfig
 
 import logging
 from typing import Optional, Any
@@ -20,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class ModelBase:
 
-    def __init__(self, model_name='default_m', model_data=None):
+    def __init__(self, model_name='default_m', model_data=None, solver_config: Optional[SolverConfig] = None):
 
         self.model_name = model_name
         self.data = model_data
@@ -42,7 +43,11 @@ class ModelBase:
         self._objective_name = '_obj'
 
         # default solver: use gurobi through Pyomo
-        self.solver = SolverFactory('gurobi_direct')
+        self.solver_config = solver_config or SolverConfig()
+        self.solver_name = self.solver_config.solver_name
+        self.solver = SolverFactory(self.solver_name)
+        self._solver_option_overrides = {}
+        self.solver_options = {}
 
         # initialize vars and results dict
         self.var, self.result, self.result_relax = {}, {}, {}
@@ -131,7 +136,70 @@ class ModelBase:
         self.model.add_component(self._objective_name, pyo.Objective(expr=expr, sense=sense))
 
     def set_solver_option(self, option_name: str, value: Any):
-        self.solver.options[option_name] = value
+        self.set_parameters({option_name: value})
+
+    @staticmethod
+    def _solver_available(solver) -> bool:
+        try:
+            return solver.available(exception_flag=False)
+        except Exception:
+            return False
+
+    def _apply_solver_options(self, use_config_defaults=True):
+        options = {}
+        if use_config_defaults:
+            active_solver_name = getattr(self.solver, 'name', None) or self.solver_name
+            options.update(self.solver_config.to_solver_options(active_solver_name))
+        options.update(self._solver_option_overrides)
+
+        for key, value in options.items():
+            self.solver.options[key] = value
+
+        self.solver_options = options.copy()
+
+    def _switch_solver(self, solver_name):
+        self.solver_name = solver_name
+        self.solver = SolverFactory(self.solver_name)
+
+    def _use_fallback_solver_if_needed(self, use_config_defaults=True):
+        fallback_solver_name = self.solver_config.fallback_solver_name
+        if fallback_solver_name is None or self.solver_name == fallback_solver_name:
+            return
+
+        if self._solver_available(self.solver):
+            return
+
+        logger.warning(
+            f'Solver {self.solver_name} is unavailable; using fallback solver {fallback_solver_name}.'
+        )
+        self._switch_solver(fallback_solver_name)
+        self._apply_solver_options(use_config_defaults=use_config_defaults)
+
+    def _solve_model(self, pyomo_model, use_config_defaults=True, load_solutions=True):
+        self._use_fallback_solver_if_needed(use_config_defaults=use_config_defaults)
+        self._apply_solver_options(use_config_defaults=use_config_defaults)
+
+        try:
+            return self.solver.solve(
+                pyomo_model,
+                tee=self.solver_config.tee,
+                load_solutions=load_solutions
+            )
+        except Exception:
+            fallback_solver_name = self.solver_config.fallback_solver_name
+            if fallback_solver_name is None or self.solver_name == fallback_solver_name:
+                raise
+
+            logger.warning(
+                f'Solver {self.solver_name} failed; retrying with fallback solver {fallback_solver_name}.'
+            )
+            self._switch_solver(fallback_solver_name)
+            self._apply_solver_options(use_config_defaults=use_config_defaults)
+            return self.solver.solve(
+                pyomo_model,
+                tee=self.solver_config.tee,
+                load_solutions=load_solutions
+            )
 
     @staticmethod
     def _has_solution(results) -> bool:
@@ -179,20 +247,25 @@ class ModelBase:
         :return: none
         set the parameters of the model.
         """
+        if param_dict is None:
+            return
         for key, value in param_dict.items():
+            self._solver_option_overrides[key] = value
             self.solver.options[key] = value
+        self.solver_options.update(param_dict)
 
     def solve(self, param_dict=None):
         logger.info(f'Optimizing model {self.model_name}')
 
-        if param_dict is None:
-            self.set_parameters(
-                param_dict={
-                    'MIPGap': 0.002
-                }
-            )
+        use_config_defaults = param_dict is None
+        if param_dict is not None:
+            self.set_parameters(param_dict=param_dict)
 
-        self._last_results = self.solver.solve(self.model, tee=True, load_solutions=True)
+        self._last_results = self._solve_model(
+            self.model,
+            use_config_defaults=use_config_defaults,
+            load_solutions=True
+        )
         self._set_solve_status_from_results(self._last_results)
         self._fill_uninitialized_vars(self.model)
 
@@ -216,7 +289,11 @@ class ModelBase:
         self.model_relax = self.model.clone()
         pyo.TransformationFactory('core.relax_integer_vars').apply_to(self.model_relax)
 
-        self._last_results_relax = self.solver.solve(self.model_relax, tee=True, load_solutions=True)
+        self._last_results_relax = self._solve_model(
+            self.model_relax,
+            use_config_defaults=True,
+            load_solutions=True
+        )
         self._fill_uninitialized_vars(self.model_relax)
 
     def get_relaxed_obj_value(self):
