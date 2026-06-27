@@ -13,7 +13,7 @@ import pickle
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from util.names import VarName
+from util.names import DECOMPOSITION_STATE_VAR_NAMES, VarName
 
 
 def enrich_iter_general_dataframe(
@@ -376,13 +376,9 @@ def load_main_stage_solution_json(path: str) -> Dict[str, Dict[Any, Any]]:
     with open(path, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
-    out = {
-        VarName.DG_INSTALL: {},
-        VarName.LINE_HARDEN: {},
-        VarName.DG_INSTALL_TYPE: {},
-    }
+    out = {var_name: {} for var_name in DECOMPOSITION_STATE_VAR_NAMES}
 
-    for var_name in [VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE]:
+    for var_name in DECOMPOSITION_STATE_VAR_NAMES:
         for raw_key, raw_value in payload.get(var_name, {}).items():
             key = raw_key
             if var_name in [VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE]:

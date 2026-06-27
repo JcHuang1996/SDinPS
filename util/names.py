@@ -158,6 +158,14 @@ class VarName:
     LAG_ESTIMATOR = 'etaEst'            # Continues, \eta, the lagrangian cut generating estimator, AFN: \eta
     AR_VAR_OBJ = 'ctx'                  # Continues, variable for recording the term cx in referred formulation
 
+
+DECOMPOSITION_STATE_VAR_NAMES = (
+    VarName.DG_INSTALL,
+    VarName.LINE_HARDEN,
+    VarName.DG_INSTALL_TYPE,
+)
+
+
 class ConstrName:
     # === Main Problem Model Constraints ===
     DG_UPPERBOUND = 'dg_ub'                             # AFN: Generator number upperbound

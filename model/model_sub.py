@@ -40,61 +40,6 @@ class ModelSub(ModelCombined):
 
         self.sub_model_sce_list = sub_model_sce_list
 
-    def build_sub_model(self):
-
-        # using existing defining functions from combined model
-        self.add_vars_basic_generator_c()
-        self.add_vars_line_connectivity()
-        self.add_vars_sys_operating()
-        self.add_vars_sys_topology()
-        self.add_constr_system_operating()
-        self.add_constr_system_topology_constraints()
-
-        # adding specific components of sub problem model
-        self.add_sub_main_common_vars()
-
-        self.add_constr_DG_rated_power_ub()
-        self.add_constr_DG_operating()
-        self.add_constr_line_connectivity()
-
-        # set submodel objective
-        self.set_sub_objective()
-
-    def add_sub_main_common_vars(self):
-        """
-        Vars in this section are the (fixed) variables from the main model.
-        They are added as Vars (not Params), fixed to the main solution,
-        so their coefficients can be tracked when generating Benders cuts.
-        """
-
-        # X^{G}_{j}: Binary (fixed)
-        self.var[VarName.DG_INSTALL] = {
-            j: self.add_var(
-                domain=pyo.Binary,
-                name=f'{VarName.DG_INSTALL}_({j})'
-            )
-            for j in self.data[DataName.LIST_NODE]
-        }
-        for j in self.data[DataName.LIST_NODE]:
-            val = self.main_result[VarName.DG_INSTALL][j]
-            self.var[VarName.DG_INSTALL][j].setlb(val)
-            self.var[VarName.DG_INSTALL][j].setub(val)
-            self.var[VarName.DG_INSTALL][j].set_value(val)
-
-        # x^L_{ij}: Binary (fixed)
-        self.var[VarName.LINE_HARDEN] = {
-            (i, j): self.add_var(
-                domain=pyo.Binary,
-                name=f'{VarName.LINE_HARDEN}_({i},{j})'
-            )
-            for (i, j) in self.data[DataName.LIST_LINE]
-        }
-        for (i, j) in self.data[DataName.LIST_LINE]:
-            val = self.main_result[VarName.LINE_HARDEN][i, j]
-            self.var[VarName.LINE_HARDEN][i, j].setlb(val)
-            self.var[VarName.LINE_HARDEN][i, j].setub(val)
-            self.var[VarName.LINE_HARDEN][i, j].set_value(val)
-
     def set_sub_objective(self):
 
         # self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
@@ -188,7 +133,38 @@ class ModelSub(ModelCombined):
 
         return constant_term, var_coeff_dict
 
-    def build_sub_model_redo(self):
+    def get_decomposition_state_var_name_list(self):
+        """Return the canonical master-state blocks copied into every subproblem."""
+        return list(DECOMPOSITION_STATE_VAR_NAMES)
+
+    def _validate_local_copy_main_result(self):
+        """Check that the provided master solution exactly matches canonical state keys."""
+        if self.main_result is None:
+            raise ValueError('main_result is required for the canonical local-copy subproblem.')
+
+        missing_var_names = [
+            var_name
+            for var_name in self.get_decomposition_state_var_name_list()
+            if var_name not in self.main_result
+        ]
+        if missing_var_names:
+            raise ValueError(f'main_result is missing decomposition state variables: {missing_var_names}')
+
+        for var_name in self.get_decomposition_state_var_name_list():
+            if var_name not in self.var:
+                raise ValueError(f'Canonical subproblem does not contain variable block: {var_name}')
+            expected_keys = set(self.var[var_name].keys())
+            provided_keys = set(self.main_result[var_name].keys())
+            missing_keys = sorted(expected_keys - provided_keys)
+            extra_keys = sorted(provided_keys - expected_keys)
+            if missing_keys or extra_keys:
+                raise ValueError(
+                    f'main_result keys mismatch for {var_name}: '
+                    f'missing={missing_keys}, extra={extra_keys}'
+                )
+
+    def build_sub_model_canonical(self):
+        """Build the subproblem with local-copy constraints as the only supported decomposition path."""
 
         # add vars, the same as add_vars in model_combined
         self.add_vars_basic_generator_bi()
@@ -212,7 +188,9 @@ class ModelSub(ModelCombined):
         self.set_sub_objective()
 
     def add_constr_state_var_local_copy(self):
-        var_name_list = sorted(self.main_result.keys())
+        """Link each canonical state variable to the supplied master solution and record its row map."""
+        self._validate_local_copy_main_result()
+        var_name_list = self.get_decomposition_state_var_name_list()
         for var_name in var_name_list:
             var_key_list = sorted(self.main_result[var_name].keys())
             for var_key in var_key_list:
@@ -222,22 +200,6 @@ class ModelSub(ModelCombined):
                     name=constr_name,
                 )
                 self.local_copy_constr_info[constr_name] = (var_name, var_key)
-
-        # for j in self.data[DataName.LIST_NODE]:
-        #     constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.DG_INSTALL}_{j}'
-        #     self.add_constr(
-        #         self.var[VarName.DG_INSTALL][j] == self.main_result[VarName.DG_INSTALL][j],
-        #         name=constr_name
-        #     )
-        #     self.local_copy_constr_info[constr_name] = (VarName.DG_INSTALL, j)
-        #
-        # for (i, j) in self.data[DataName.LIST_LINE]:
-        #     constr_name = f'{ConstrName.VAR_LOCAL_COPY}_{VarName.LINE_HARDEN}_{i}_{j}'
-        #     self.add_constr(
-        #         self.var[VarName.LINE_HARDEN][i, j] == self.main_result[VarName.LINE_HARDEN][i, j],
-        #         name=constr_name
-        #     )
-        #     self.local_copy_constr_info[constr_name] = (VarName.LINE_HARDEN, (i, j))
 
     def collect_dual_opt_sol(self, constr_to_collect_list):
         """
@@ -255,4 +217,3 @@ class ModelSub(ModelCombined):
             constr_var_map[constr_name] = self.local_copy_constr_info[constr_name]
 
         return self.constr_dual_value.copy(), constr_var_map
-

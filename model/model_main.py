@@ -28,11 +28,7 @@ class ModelMain(ModelCombined):
             model_data.get(DataName.MAIN_PROBLEM_MODEL_TYPE, MainProblemModelTypeName.COLLAPSED_NO_TIME)
             if model_data is not None else MainProblemModelTypeName.COLLAPSED_NO_TIME
         )
-        self.decomposition_state_var_name_list = [
-            VarName.DG_INSTALL,
-            VarName.LINE_HARDEN,
-            VarName.DG_INSTALL_TYPE,
-        ]
+        self.decomposition_state_var_name_list = list(DECOMPOSITION_STATE_VAR_NAMES)
         self.decomposition_structural_constr_name_list = []
 
     def build_main_model(self):
@@ -75,12 +71,15 @@ class ModelMain(ModelCombined):
             raise ValueError(f'Unsupported main_problem_model_type: {self.main_problem_model_type}')
 
     def get_decomposition_state_var_name_list(self):
+        """Return the canonical master-state blocks used by subproblems and CGLP."""
         return list(self.decomposition_state_var_name_list)
 
     def get_decomposition_structural_constr_name_list(self):
+        """Return master structural rows used when building CGLP models."""
         return list(self.decomposition_structural_constr_name_list)
 
     def get_decomposition_var_key_lists_for_cglp(self):
+        """Split canonical master-state variables into binary and continuous CGLP key lists."""
         x_var_key_list, z_var_key_list = [], []
 
         for var_name in self.get_decomposition_state_var_name_list():
