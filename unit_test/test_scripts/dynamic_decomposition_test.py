@@ -6,10 +6,27 @@
 
 import os
 import sys
-import json
 
 from algo.two_stage_decomp_redo import TwoStageDecompRedo
-from algo.algo_simple_tools import analyze_scenario_solutions, detect_and_record_repetition
+from algo.algo_simple_tools import detect_and_record_repetition
+from algo.runner_helpers import (
+    IncumbentTracker,
+    add_candidate_cut as _add_candidate_cut,
+    add_integer_opt_fallback as _add_integer_opt_fallback,
+    check_phase_end_iterations as _check_phase_end_iterations,
+    compute_main_stage_obj_value as _compute_main_stage_obj_value,
+    ensure_exact_sub_obj_value as _ensure_exact_sub_obj_value,
+    evaluate_incumbent_for_main_result as _evaluate_incumbent_for_main_result,
+    get_added_obj_term_weight_for_phase as _get_added_obj_term_weight_for_phase,
+    get_branch_name as _get_branch_name,
+    get_candidate_cut_types as _get_candidate_cut_types,
+    get_phase_name as _get_phase_name,
+    setup_pretrained_cut,
+    should_add_integer_opt_fallback as _should_add_integer_opt_fallback,
+    should_try_post_integer_cglp as _should_try_post_integer_cglp,
+    solve_fixed_main_result_lower_bound as _solve_fixed_main_result_lower_bound,
+    write_iteration_branch_cut_report as _write_iteration_branch_cut_report,
+)
 
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -33,304 +50,10 @@ from util.tools import (
 from datetime import datetime
 import copy
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 
 logger = logging.getLogger(__name__)
-
-
-def _check_phase_end_iterations(
-    phase_1_end_iteration: Optional[int],
-    phase_2_end_iteration: Optional[int],
-    phase_3_end_iteration: Optional[int],
-    max_iterations: int,
-) -> None:
-    if phase_1_end_iteration is None or phase_2_end_iteration is None or phase_3_end_iteration is None:
-        raise ValueError("phase_1_end_iteration, phase_2_end_iteration, and phase_3_end_iteration must all be set")
-    if not (0 <= phase_1_end_iteration <= phase_2_end_iteration <= phase_3_end_iteration == max_iterations - 1):
-        raise ValueError(
-            "Phase endpoints must satisfy "
-            "0 <= phase_1_end_iteration <= phase_2_end_iteration <= phase_3_end_iteration == max_iterations - 1"
-        )
-
-
-def _get_phase_name(
-    ite_num: int,
-    phase_1_end_iteration: int,
-    phase_2_end_iteration: int,
-    phase_3_end_iteration: int,
-) -> str:
-    if ite_num <= phase_1_end_iteration:
-        return "phase_1"
-    if ite_num <= phase_2_end_iteration:
-        return "phase_2"
-    if ite_num <= phase_3_end_iteration:
-        return "phase_3"
-    raise ValueError(f"Iteration {ite_num} is outside configured phase ranges")
-
-
-def _get_branch_name(phase_name: str, frac_is_repeated: bool, curr_is_repeated: bool) -> str:
-    if phase_name == "phase_1":
-        return "phase_1_repeated_frac" if frac_is_repeated else "phase_1_new_frac"
-    if phase_name == "phase_2":
-        return "phase_2_repeated_frac" if frac_is_repeated else "phase_2_new_frac"
-    if phase_name == "phase_3":
-        if not frac_is_repeated:
-            return "phase_3_new_frac"
-        if not curr_is_repeated:
-            return "phase_3_repeated_frac_new_curr"
-        return "phase_3_repeated_frac_repeated_curr"
-    raise ValueError(f"Unsupported phase_name: {phase_name}")
-
-
-def _get_added_obj_term_weight_for_phase(
-    phase_name: str,
-    default_weight: float,
-    phase_1_weight: Optional[float],
-    phase_2_weight: Optional[float],
-    phase_3_weight: Optional[float],
-) -> float:
-    if phase_name == "phase_1" and phase_1_weight is not None:
-        return float(phase_1_weight)
-    if phase_name == "phase_2" and phase_2_weight is not None:
-        return float(phase_2_weight)
-    if phase_name == "phase_3" and phase_3_weight is not None:
-        return float(phase_3_weight)
-    return float(default_weight)
-
-
-def _get_candidate_cut_types(branch_name: str) -> List[str]:
-    branch_cut_map = {
-        "phase_1_new_frac": ["benders"],
-        "phase_1_repeated_frac": [],
-        "phase_2_new_frac": ["benders", "strengthen_benders"],
-        "phase_2_repeated_frac": [],
-        "phase_3_new_frac": ["benders", "strengthen_benders", "cglp", "lagrangian"],
-        "phase_3_repeated_frac_new_curr": [],
-        "phase_3_repeated_frac_repeated_curr": [
-            "benders",
-            "strengthen_benders",
-            "cglp",
-            "lagrangian",
-            "integer_opt",
-        ],
-    }
-    return branch_cut_map[branch_name]
-
-
-def _should_add_integer_opt_fallback(branch_name: str, any_candidate_repeated: bool) -> bool:
-    if branch_name in ["phase_1_repeated_frac", "phase_2_repeated_frac", "phase_3_repeated_frac_new_curr"]:
-        return True
-    if branch_name in ["phase_1_new_frac", "phase_2_new_frac", "phase_3_new_frac"]:
-        return any_candidate_repeated
-    return False
-
-
-def _should_try_post_integer_cglp(branch_name: str) -> bool:
-    return branch_name == "phase_3_repeated_frac_new_curr"
-
-
-def _make_cross_family_row_guard(two_stage_decomp_module: TwoStageDecompRedo, cut_type: str, preview: Dict[str, Any]):
-    def _guard(cut_row: dict, cut_name: str) -> bool:
-        peek_record = two_stage_decomp_module.cut_repetition_tracker.peek_by_row(
-            cut_type=cut_type,
-            row=cut_row,
-            include_cut_type=False,
-        )
-        preview.clear()
-        preview.update(peek_record)
-        preview["cut_name"] = cut_name
-        return not peek_record["is_repeated"]
-
-    return _guard
-
-
-def _add_candidate_cut(
-    two_stage_decomp_module: TwoStageDecompRedo,
-    cut_type: str,
-    sub_sce_list: List,
-    ite_name: str,
-    curr_main_result: dict,
-    frac_main_result: dict,
-    sub_obj_value_for_benders: float,
-    frac_sub_obj_value_for_benders: Optional[float],
-    constr_dual_bi: Any,
-    constr_var_map_bi: Any,
-    constr_dual_frac: Any,
-    constr_var_map_frac: Any,
-    exact_sub_obj_value: Optional[float],
-    max_lagrangian_ite: int = 10,
-) -> Dict[str, Any]:
-    preview = {"is_repeated": False}
-    row_guard = _make_cross_family_row_guard(
-        two_stage_decomp_module=two_stage_decomp_module,
-        cut_type=cut_type,
-        preview=preview,
-    )
-
-    if cut_type == "benders":
-        if constr_dual_frac is None or constr_var_map_frac is None or frac_sub_obj_value_for_benders is None:
-            raise ValueError("Fractional Benders cut requires fractional dual info, var map, and relaxed sub objective.")
-        two_stage_decomp_module.add_benders_cut(
-            sub_sce_list=sub_sce_list,
-            ite_name=ite_name,
-            sub_obj_value=frac_sub_obj_value_for_benders,
-            constr_dual_info=constr_dual_frac,
-            constr_var_map=constr_var_map_frac,
-            forward_sol=frac_main_result,
-            should_add_cut_row=row_guard,
-            include_cut_type_in_repetition=False,
-        )
-    elif cut_type == "strengthen_benders" and constr_dual_frac is not None:
-        two_stage_decomp_module.add_strengthen_benders_cut(
-            sub_sce_list=sub_sce_list,
-            ite_name=ite_name,
-            given_main_result=frac_main_result,
-            given_dual_info=constr_dual_frac,
-            constr_var_map=constr_var_map_frac,
-            should_add_cut_row=row_guard,
-            include_cut_type_in_repetition=False,
-        )
-    elif cut_type == "cglp" and exact_sub_obj_value is not None:
-        two_stage_decomp_module.add_cglp_cut(
-            sub_sce_list=sub_sce_list,
-            ite_name=ite_name,
-            forward_sol=curr_main_result,
-            exact_sub_obj_value=exact_sub_obj_value,
-            should_add_cut_row=row_guard,
-            include_cut_type_in_repetition=False,
-        )
-    elif cut_type == "lagrangian" and constr_dual_frac is not None:
-        two_stage_decomp_module.add_lagrangian_cut(
-            sub_sce_list=sub_sce_list,
-            ite_name=ite_name,
-            given_main_result=frac_main_result,
-            given_dual_info=constr_dual_frac,
-            constr_var_map=constr_var_map_frac,
-            max_ite_num=max_lagrangian_ite,
-            should_add_cut_row=row_guard,
-            include_cut_type_in_repetition=False,
-        )
-    elif cut_type == "integer_opt" and exact_sub_obj_value is not None:
-        two_stage_decomp_module.add_integer_opt_cut(
-            sub_sce_list=sub_sce_list,
-            ite_name=ite_name,
-            exact_sub_obj_value=exact_sub_obj_value,
-            forward_sol=curr_main_result,
-            lower_bound=0.0,
-            should_add_cut_row=row_guard,
-            include_cut_type_in_repetition=False,
-        )
-
-    return preview
-
-
-def _add_integer_opt_fallback(
-    two_stage_decomp_module: TwoStageDecompRedo,
-    sub_sce_list: List,
-    ite_name: str,
-    curr_main_result: dict,
-    exact_sub_obj_value: float,
-) -> None:
-    two_stage_decomp_module.add_integer_opt_cut(
-        sub_sce_list=sub_sce_list,
-        ite_name=ite_name,
-        exact_sub_obj_value=exact_sub_obj_value,
-        forward_sol=curr_main_result,
-        lower_bound=0.0,
-        include_cut_type_in_repetition=False,
-    )
-
-
-def _ensure_exact_sub_obj_value(
-    two_stage_decomp_module: TwoStageDecompRedo,
-    sub_sce_list: List,
-    curr_main_result: dict,
-    exact_sub_obj_value: Optional[float],
-) -> float:
-    if exact_sub_obj_value is not None:
-        return exact_sub_obj_value
-
-    two_stage_decomp_module.solve_sub_model()
-    exact_sub_obj_value = two_stage_decomp_module.current_sub_model.get_obj_value()
-    two_stage_decomp_module._register_exact_point_for_group(
-        sub_sce_list=sub_sce_list,
-        forward_sol=curr_main_result,
-        exact_sub_obj_value=exact_sub_obj_value,
-    )
-    return exact_sub_obj_value
-
-
-def _compute_main_stage_obj_value(two_stage_decomp_module: TwoStageDecompRedo, main_result: dict) -> float:
-    return two_stage_decomp_module.model_main.evaluate_design_objective_for_solution(main_result)
-
-
-def _write_iteration_branch_cut_report(
-    output_dir: str,
-    iteration_branch_cut_records: List[dict],
-    file_name: str = "iteration_branch_cut_report.json",
-) -> str:
-    path = os.path.join(output_dir, file_name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"iteration_branch_cut_records": iteration_branch_cut_records}, f, indent=2)
-    return path
-
-
-def _summarize_incumbent_records(sce_prob: dict, incumbent_records: List[tuple]) -> Tuple[float, dict]:
-    incumbent_obj_value = 0.0
-    temp_iter_sub_results = {VarName.DG_ACTIVE_POWER: {}, VarName.DG_RATED_POWER: {}}
-
-    for sub_sce_list, sub_obj_w_main, sub_res in incumbent_records:
-        incumbent_obj_value += sub_obj_w_main * sum(sce_prob[s_idx] for s_idx in sub_sce_list)
-        for key, val in sub_res[VarName.DG_ACTIVE_POWER].items():
-            temp_iter_sub_results[VarName.DG_ACTIVE_POWER][key] = val
-        for j, val in sub_res[VarName.DG_RATED_POWER].items():
-            for s in sub_sce_list:
-                temp_iter_sub_results[VarName.DG_RATED_POWER][(j, s)] = val
-
-    return incumbent_obj_value, temp_iter_sub_results
-
-
-def _evaluate_incumbent_for_main_result(
-    two_stage_decomp_module: TwoStageDecompRedo,
-    sce_group_list: List[List],
-    ite_name: str,
-    main_result: dict,
-    main_stage_obj: float,
-    sce_prob: dict,
-) -> Tuple[float, dict]:
-    incumbent_records = []
-    for sub_sce_list in sce_group_list:
-        two_stage_decomp_module._gather_one_group_cut_data(
-            sub_sce_list=sub_sce_list,
-            curr_main_result=main_result,
-            frac_main_result=main_result,
-            ite_name=ite_name,
-            add_strengthen=False,
-            add_lagrangian=False,
-            add_cglp=False,
-            need_frac_sub_model=False,
-            need_exact_sub_obj=False,
-            main_stage_obj=main_stage_obj,
-            incumbent_records=incumbent_records,
-        )
-
-    return _summarize_incumbent_records(sce_prob=sce_prob, incumbent_records=incumbent_records)
-
-
-def _solve_fixed_main_result_lower_bound(
-    two_stage_decomp_module: TwoStageDecompRedo,
-    ite_name: str,
-    main_result: dict,
-) -> float:
-    try:
-        two_stage_decomp_module.model_main.fix_variable_value(var_fix_info=main_result)
-        two_stage_decomp_module.solve_main_stage_model()
-        _, main_bound = two_stage_decomp_module.record_main_stage_model(ite_name=ite_name)
-    finally:
-        two_stage_decomp_module.model_main.recover_variable_from_fixed()
-
-    return main_bound
 
 
 def run_decomp_module_test(
@@ -416,41 +139,18 @@ def run_decomp_module_test(
     two_stage_decomp_module.build_main_stage_model()
     two_stage_decomp_module.model_main.set_added_obj_term_weight(added_obj_term_weight)
 
-    (expectation, keys_above, keys_below, sum_above, sum_below,
-     true_keys_above, true_keys_below, true_sum_above, true_sum_below, best_hat) = analyze_scenario_solutions(
+    setup_pretrained_cut(
+        two_stage_decomp_module=two_stage_decomp_module,
         dataset_path=data_read_path,
         scenario_list=scenario_list,
-        hat=0.3334
+        hat=0.3334,
+        use_fallback_partition=True,
+        logger=logger,
     )
-
-    if (
-        true_keys_above is not None
-        and true_keys_below is not None
-        and true_sum_above is not None
-        and true_sum_below is not None
-    ):
-        true_sum_above_value = sum(true_sum_above.values())
-        true_sum_below_value = sum(true_sum_below.values())
-        two_stage_decomp_module.model_main.set_pretrained_cut(
-            above_var=true_keys_above,
-            below_var=true_keys_below,
-            above_sum=true_sum_above_value,
-            below_sum=true_sum_below_value,
-        )
-    else:
-        sum_above_value = sum(sum_above.values())
-        sum_below_value = sum(sum_below.values())
-        two_stage_decomp_module.model_main.set_pretrained_cut(
-            above_var=keys_above,
-            below_var=keys_below,
-            above_sum=sum_above_value,
-            below_sum=sum_below_value,
-        )
 
     sce_group_list = [[s] for s in scenario_list]
 
-    best_obj = float('inf')
-    best_sub_results = None
+    incumbent_tracker = IncumbentTracker()
     curr_main_result_history = []
     frac_main_result_history = []
     curr_main_repetition_records = []
@@ -472,8 +172,6 @@ def run_decomp_module_test(
             phase_2_end_iteration=phase_2_end_iteration,
             phase_3_end_iteration=phase_3_end_iteration,
         )
-        temp_iter_sub_results = {VarName.DG_ACTIVE_POWER: {}, VarName.DG_RATED_POWER: {}}
-
         curr_added_obj_term_weight = _get_added_obj_term_weight_for_phase(
             phase_name=ite_phase_name,
             default_weight=added_obj_term_weight,
@@ -640,24 +338,17 @@ def run_decomp_module_test(
             iteration_cut_record["scenario_group_records"].append(group_record)
 
         if incumbent_records is not None:
-            curr_incumbent_obj_value, temp_iter_sub_results = _summarize_incumbent_records(
+            curr_incumbent_obj_value, _, _ = incumbent_tracker.update_from_records(
+                two_stage_decomp_module=two_stage_decomp_module,
+                ite_name=ite_name,
                 sce_prob=sce_prob,
                 incumbent_records=incumbent_records,
             )
 
-        if do_record_incumbent:
-            two_stage_decomp_module.ite_obj_value_dict[ite_name]['sub_obj(best_incumbent)'] = {
-                'sub_p_total': curr_incumbent_obj_value
-            }
-            new_best = curr_incumbent_obj_value < best_obj
-            best_obj = min(best_obj, curr_incumbent_obj_value)
-            if new_best:
-                best_sub_results = copy.deepcopy(temp_iter_sub_results)
-
         if enable_result_output:
             two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
 
-        if do_record_incumbent and best_obj - main_bound <= 0.01 * best_obj:
+        if do_record_incumbent and incumbent_tracker.has_converged(main_bound=main_bound, rel_gap=0.01):
             iteration_branch_cut_records.append(iteration_cut_record)
             logger.info(f'Ite {ite_name} has reached convergence by the gap of 1%')
             break
@@ -685,22 +376,17 @@ def run_decomp_module_test(
             incumbent_records=ref_0_incumbent_records,
             max_lagrangian_ite=10,
         )
-        ref_0_incumbent_obj_value, temp_iter_sub_results = _summarize_incumbent_records(
+        ref_0_incumbent_obj_value, _, _ = incumbent_tracker.update_from_records(
+            two_stage_decomp_module=two_stage_decomp_module,
+            ite_name=ref_0_name,
             sce_prob=sce_prob,
             incumbent_records=ref_0_incumbent_records,
         )
-        two_stage_decomp_module.ite_obj_value_dict[ref_0_name]['sub_obj(best_incumbent)'] = {
-            'sub_p_total': ref_0_incumbent_obj_value
-        }
         _solve_fixed_main_result_lower_bound(
             two_stage_decomp_module=two_stage_decomp_module,
             ite_name=ref_0_name,
             main_result=reference_main_result,
         )
-        new_best = ref_0_incumbent_obj_value < best_obj
-        best_obj = min(best_obj, ref_0_incumbent_obj_value)
-        if new_best:
-            best_sub_results = copy.deepcopy(temp_iter_sub_results)
         iteration_branch_cut_records.append({
             "iteration": ref_0_name,
             "phase_name": "reference_solution_phase",
@@ -736,13 +422,12 @@ def run_decomp_module_test(
             main_stage_obj=ref_1_main_stage_obj,
             sce_prob=sce_prob,
         )
-        two_stage_decomp_module.ite_obj_value_dict[ref_1_name]['sub_obj(best_incumbent)'] = {
-            'sub_p_total': ref_1_incumbent_obj_value
-        }
-        new_best = ref_1_incumbent_obj_value < best_obj
-        best_obj = min(best_obj, ref_1_incumbent_obj_value)
-        if new_best:
-            best_sub_results = copy.deepcopy(temp_iter_sub_results)
+        incumbent_tracker.update_from_value(
+            two_stage_decomp_module=two_stage_decomp_module,
+            ite_name=ref_1_name,
+            incumbent_obj_value=ref_1_incumbent_obj_value,
+            sub_results=temp_iter_sub_results,
+        )
         iteration_branch_cut_records.append({
             "iteration": ref_1_name,
             "phase_name": "reference_solution_phase",
@@ -763,18 +448,17 @@ def run_decomp_module_test(
             main_stage_obj=ref_2_main_stage_obj,
             sce_prob=sce_prob,
         )
-        two_stage_decomp_module.ite_obj_value_dict[ref_2_name]['sub_obj(best_incumbent)'] = {
-            'sub_p_total': ref_2_incumbent_obj_value
-        }
         _solve_fixed_main_result_lower_bound(
             two_stage_decomp_module=two_stage_decomp_module,
             ite_name=ref_2_name,
             main_result=reference_main_result,
         )
-        new_best = ref_2_incumbent_obj_value < best_obj
-        best_obj = min(best_obj, ref_2_incumbent_obj_value)
-        if new_best:
-            best_sub_results = copy.deepcopy(temp_iter_sub_results)
+        incumbent_tracker.update_from_value(
+            two_stage_decomp_module=two_stage_decomp_module,
+            ite_name=ref_2_name,
+            incumbent_obj_value=ref_2_incumbent_obj_value,
+            sub_results=temp_iter_sub_results,
+        )
         iteration_branch_cut_records.append({
             "iteration": ref_2_name,
             "phase_name": "reference_solution_phase",
@@ -809,9 +493,9 @@ def run_decomp_module_test(
         },
     )
 
-    if enable_result_output and best_sub_results is not None:
+    if enable_result_output and incumbent_tracker.best_sub_results is not None:
         write_power_usage_capacity_ratio(
-            best_sub_results=best_sub_results,
+            best_sub_results=incumbent_tracker.best_sub_results,
             output_dir=output_dir,
         )
 

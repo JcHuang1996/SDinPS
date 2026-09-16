@@ -8,7 +8,8 @@ import os
 import sys
 
 from algo.two_stage_decomp_redo import TwoStageDecompRedo
-from algo.algo_simple_tools import analyze_scenario_solutions, detect_and_record_repetition
+from algo.algo_simple_tools import detect_and_record_repetition
+from algo.runner_helpers import IncumbentTracker, setup_pretrained_cut
 
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -171,40 +172,21 @@ def run_decomp_module_test(
     two_stage_decomp_module.build_main_stage_model()
     two_stage_decomp_module.model_main.set_added_obj_term_weight(added_obj_term_weight)
 
-    (expectation, keys_above, keys_below, sum_above, sum_below,
-     true_keys_above, true_keys_below, true_sum_above, true_sum_below, best_hat) = analyze_scenario_solutions(
+    setup_pretrained_cut(
+        two_stage_decomp_module=two_stage_decomp_module,
         dataset_path=data_read_path,
         scenario_list=scenario_list,
-        hat=0.3334
+        hat=0.3334,
+        use_fallback_partition=False,
+        logger=logger,
     )
-
-    if (
-        true_keys_above is not None
-        and true_keys_below is not None
-        and true_sum_above is not None
-        and true_sum_below is not None
-    ):
-        true_sum_above_value = sum(true_sum_above.values())
-        true_sum_below_value = sum(true_sum_below.values())
-        two_stage_decomp_module.model_main.set_pretrained_cut(
-            above_var=true_keys_above,
-            below_var=true_keys_below,
-            above_sum=true_sum_above_value,
-            below_sum=true_sum_below_value,
-        )
-    else:
-        logger.info(
-            "Skipping pretrained cut because no combined scenario solution was found for %s.",
-            scenario_list,
-        )
 
     # decide how to group and iterate the scenarios
     sce_group_list = [
         [s] for s in scenario_list
     ]
 
-    best_obj = float('inf')
-    best_sub_results = None  # best-iteration sub results: {VarName.DG_ACTIVE_POWER: {(j,t,s): v}, VarName.DG_RATED_POWER: {(j,s): v}}
+    incumbent_tracker = IncumbentTracker()
     curr_main_result_history = []
     frac_main_result_history = []
     curr_main_repetition_records = []
@@ -219,8 +201,6 @@ def run_decomp_module_test(
         logger.info(f"Current iteration: {ite_num}")
 
         ite_name = str(ite_num)
-        temp_iter_sub_results = {VarName.DG_ACTIVE_POWER: {}, VarName.DG_RATED_POWER: {}}
-
         # solve main model
         two_stage_decomp_module.solve_main_stage_model()
 
@@ -230,9 +210,6 @@ def run_decomp_module_test(
         # record the result of the main model required by the sub problems
         curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
 
-        # the best incumbent objective value will be given by the weighted sum of sub-problem objective values
-        # starting from 0 (only when recording)
-        curr_incumbent_obj_value = 0
         do_record_incumbent = record_incumbent_every_k is None or ite_num % record_incumbent_every_k == 0
 
         # the following part aims on collecting relaxed solution from main problem for better cut
@@ -300,25 +277,15 @@ def run_decomp_module_test(
             )
 
         if incumbent_records is not None:
-            for sub_sce_list, sub_obj_w_main, sub_res in incumbent_records:
-                curr_incumbent_obj_value += sub_obj_w_main * sum(sce_prob[s_idx] for s_idx in sub_sce_list)
-                for key, val in sub_res[VarName.DG_ACTIVE_POWER].items():
-                    temp_iter_sub_results[VarName.DG_ACTIVE_POWER][key] = val
-                for j, val in sub_res[VarName.DG_RATED_POWER].items():
-                    for s in sub_sce_list:
-                        temp_iter_sub_results[VarName.DG_RATED_POWER][(j, s)] = val
-
-        if do_record_incumbent:
-            two_stage_decomp_module.ite_obj_value_dict[ite_name]['sub_obj(best_incumbent)'] = {
-                'sub_p_total': curr_incumbent_obj_value
-            }
-            new_best = curr_incumbent_obj_value < best_obj
-            best_obj = min(best_obj, curr_incumbent_obj_value)
-            if new_best:
-                best_sub_results = copy.deepcopy(temp_iter_sub_results)
+            incumbent_tracker.update_from_records(
+                two_stage_decomp_module=two_stage_decomp_module,
+                ite_name=ite_name,
+                sce_prob=sce_prob,
+                incumbent_records=incumbent_records,
+            )
         if enable_result_output:
             two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
-        if do_record_incumbent and best_obj - main_bound <= 0.01 * best_obj:
+        if do_record_incumbent and incumbent_tracker.has_converged(main_bound=main_bound, rel_gap=0.01):
             logger.info(f'Ite {ite_name} has reached convergence by the gap of 1%')
             break
 
@@ -343,9 +310,9 @@ def run_decomp_module_test(
         },
     )
 
-    if enable_result_output and best_sub_results is not None:
+    if enable_result_output and incumbent_tracker.best_sub_results is not None:
         write_power_usage_capacity_ratio(
-            best_sub_results=best_sub_results,
+            best_sub_results=incumbent_tracker.best_sub_results,
             output_dir=output_dir,
         )
 

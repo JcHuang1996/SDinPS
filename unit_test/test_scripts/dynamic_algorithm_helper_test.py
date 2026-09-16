@@ -13,12 +13,12 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 from algo.algo_simple_tools import CutRepetitionTracker, normalize_affine_lower_bound_row
-from unit_test.test_scripts.dynamic_decomposition_test import (
-    _get_branch_name,
-    _get_candidate_cut_types,
-    _get_phase_name,
-    _should_add_integer_opt_fallback,
-    _should_try_post_integer_cglp,
+from algo.runner_helpers import (
+    get_branch_name,
+    get_candidate_cut_types,
+    get_phase_name,
+    should_add_integer_opt_fallback,
+    should_try_post_integer_cglp,
 )
 from util.names import VarName
 from util.tools import load_main_stage_solution_json
@@ -92,35 +92,35 @@ def test_cut_repetition_tracker_cross_family_preview() -> None:
 
 
 def test_phase_and_branch_helpers() -> None:
-    _assert_true(_get_phase_name(0, 1, 3, 5) == "phase_1", "Iteration 0 should be in phase_1")
-    _assert_true(_get_phase_name(2, 1, 3, 5) == "phase_2", "Iteration 2 should be in phase_2")
-    _assert_true(_get_phase_name(5, 1, 3, 5) == "phase_3", "Iteration 5 should be in phase_3")
+    _assert_true(get_phase_name(0, 1, 3, 5) == "phase_1", "Iteration 0 should be in phase_1")
+    _assert_true(get_phase_name(2, 1, 3, 5) == "phase_2", "Iteration 2 should be in phase_2")
+    _assert_true(get_phase_name(5, 1, 3, 5) == "phase_3", "Iteration 5 should be in phase_3")
 
     _assert_true(
-        _get_branch_name("phase_3", frac_is_repeated=True, curr_is_repeated=False) == "phase_3_repeated_frac_new_curr",
+        get_branch_name("phase_3", frac_is_repeated=True, curr_is_repeated=False) == "phase_3_repeated_frac_new_curr",
         "Unexpected branch for repeated frac and new curr main result",
     )
     _assert_true(
-        _get_candidate_cut_types("phase_3_repeated_frac_repeated_curr")[-1] == "integer_opt",
+        get_candidate_cut_types("phase_3_repeated_frac_repeated_curr")[-1] == "integer_opt",
         "Phase-3 repeated/repeated branch should include integer_opt candidate",
     )
 
 
 def test_dynamic_branch_rules() -> None:
     _assert_true(
-        _should_add_integer_opt_fallback("phase_1_new_frac", any_candidate_repeated=True),
+        should_add_integer_opt_fallback("phase_1_new_frac", any_candidate_repeated=True),
         "Phase-1 new-frac branch should fall back to integer-opt when a candidate repeats",
     )
     _assert_true(
-        not _should_add_integer_opt_fallback("phase_3_repeated_frac_repeated_curr", any_candidate_repeated=True),
+        not should_add_integer_opt_fallback("phase_3_repeated_frac_repeated_curr", any_candidate_repeated=True),
         "Phase-3 repeated/repeated branch should not use integer-opt fallback logic",
     )
     _assert_true(
-        _should_try_post_integer_cglp("phase_3_repeated_frac_new_curr"),
+        should_try_post_integer_cglp("phase_3_repeated_frac_new_curr"),
         "Phase-3 repeated-frac/new-curr branch should try the post-integer CGLP cut",
     )
     _assert_true(
-        not _should_try_post_integer_cglp("phase_3_new_frac"),
+        not should_try_post_integer_cglp("phase_3_new_frac"),
         "Only the repeated-frac/new-curr branch should use the post-integer CGLP path",
     )
 
