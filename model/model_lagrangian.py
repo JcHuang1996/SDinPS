@@ -6,14 +6,15 @@
 
 from model.model_combined import ModelCombined
 from model.model_base import ModelBase
+from model.formulation_blocks import (
+    add_operating_objective_terms,
+    make_sub_formulation_adapter,
+)
 
 from util.headers import *
 from util.names import *
 
 import pyomo.environ as pyo
-import math
-import os
-import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -115,16 +116,22 @@ class PSInnerMinimizationProblem(ModelInnerMinimizationProblem, ModelCombined):
         self.add_constr_system_topology_constraints()
 
     def get_sub_objective_expr(self):
-        return pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
-        ) + pyo.quicksum(
-            self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
+        """
+        c^T x for the inner minimization, in the SAME units as the subproblem it belongs to:
+        weighted by the unconditional scenario probabilities and built by the shared formulation
+    block, so the recourse objective is written in exactly one place (workstream 6).
+        """
+        if not hasattr(self, '_sub_formulation_adapter'):
+            self._sub_formulation_adapter = make_sub_formulation_adapter(self.data)
+        add_operating_objective_terms(
+            self,
+            adapter=self._sub_formulation_adapter,
+            dg_obj_name=ObjName.DG_GENERATING_COST,
+            load_shed_obj_name=ObjName.LOAD_SHED_COST,
+        )
+        return (
+            self.obj_term[ObjName.DG_GENERATING_COST]
+            + self.obj_term[ObjName.LOAD_SHED_COST]
         )
 
 
@@ -152,19 +159,8 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
 
         self.ite_executed_num = 0
 
-    def build_ini_model(self, ini_sub_obj_value, ini_main_sol, ini_multiplier, ini_stabilization_param):
-        r"""
-        ini_sub_obj_value: the c^{T}*\bar{x}^{1}
-        ini_main_sol: the \bar{z}^{1}
-        Build the initial version of the Lagrangian multiplier obtaining model, with following steps:
-        1. add variable \eta
-        2. add variables \lambda
-        3. add one initial constraint in the format of \eta <= (a second stage objective value corresponding to x) + ((y - z) * lambda
-        4. set initial objective function
-        """
-
-        ini_multiplier = self.constr_dual_info.copy()
-
+    def build_ini_model(self, ini_multiplier, ini_stabilization_param):
+        """Build multiplier variables and their initial regularization; the caller adds oracle rows."""
         self.var[VarName.LIFT_VALUE] = self.add_var(domain=pyo.Reals, name=f'{VarName.LIFT_VALUE}')
 
         constr_name_list = sorted(self.constr_dual_info.keys())
@@ -175,14 +171,13 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
             for constr_name in constr_name_list
         }
 
-        # self.add_constr_for_regularized_model(sub_obj_value=ini_sub_obj_value, main_sol=ini_main_sol)
-
         self.set_objective_function(stabilization_param=ini_stabilization_param, prev_multiplier=ini_multiplier)
 
         self.ite_executed_num += 1
 
     def add_constr_for_regularized_model(self, sub_obj_value=None, main_sol=None):
 
+        approximation_constr_name = f'inner_approx_{self.ite_executed_num+1}'
         self.add_constr(
             self.var[VarName.LIFT_VALUE] <= sub_obj_value + pyo.quicksum(
                 self.var[VarName.LAG_MULTIPLIER][constr_name]
@@ -190,8 +185,9 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
                    - main_sol[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]])
                 for constr_name in self.constr_name_list
             ),
-            name=f'inner_approx_{self.ite_executed_num+1}'
+            name=approximation_constr_name
         )
+        self.ite_executed_num += 1
 
     def set_objective_function(self, stabilization_param=None, prev_multiplier=None):
 
@@ -204,80 +200,3 @@ class ModelLagrangianMultiplierHeuristic(ModelBase):
 
     def obtain_lift_value(self):
         return pyo.value(self.var[VarName.LIFT_VALUE])
-
-
-# class ModelLagrangianCutDeterministic(ModelCombined):
-#     """
-#     Reference:
-#     Rahmaniani, R., Ahmed, S., Crainic, T. G., Gendreau, M., & Rei, W. (2020).
-#     The Benders Dual Decomposition Method. Operations Research, 68(3), 878–895.
-#     https://doi-org.prox.lib.ncsu.edu/10.1287/opre.2019.1892
-#
-#     The model solve MINLP (8) in the reference paper for generating exact Lagrangian cut.
-#     """
-#     def __init__(self, model_name='default_m', model_data=None, main_result=None, constr_dual_info=None, constr_var_map=None):
-#         super().__init__(model_name=model_name, model_data=model_data)
-#
-#         self.main_result = main_result
-#
-#         self.constr_dual_info = constr_dual_info
-#         self.constr_var_map = constr_var_map
-#
-#     def build_model(self):
-#         # add vars, the same as add_vars in model_combined
-#         self.add_vars_basic_generator_bi()
-#         self.add_vars_basic_generator_c()
-#         self.add_vars_basic_line()
-#         self.add_vars_line_connectivity()
-#         self.add_vars_sys_operating()
-#         self.add_vars_sys_topology()
-#
-#         # add constraints, the same as add_constraints in model_combine, except that DG_ub is removed
-#         self.add_constr_DG_rated_power_ub()
-#         self.add_constr_DG_operating()
-#         self.add_constr_line_connectivity()
-#         self.add_constr_system_operating()
-#         self.add_constr_system_topology_constraints()
-#
-#         # add Lagrangian cut generation components: \eta, the constraint for describing eta, objective function
-#         self.add_lagrangian_generating_components()
-#
-#     def add_lagrangian_generating_components(self):
-#
-#         self.var[VarName.LAG_ESTIMATOR] = self.add_var(domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}')
-#
-#         self.var[VarName.AR_VAR_OBJ] = self.add_var(domain=pyo.Reals, name=f'{VarName.AR_VAR_OBJ}')
-#
-#         constr_name_list = sorted(self.constr_dual_info.keys())
-#         self.var[VarName.LAG_MULTIPLIER] = {
-#             constr_name: self.add_var(
-#                 domain=pyo.Reals, name=f'{VarName.LAG_MULTIPLIER}_{constr_name}'
-#             )
-#             for constr_name in constr_name_list
-#         }
-#
-#         self.add_constr(
-#             self.var[VarName.AR_VAR_OBJ] == pyo.quicksum(
-#                 self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
-#                 for j in self.data[DataName.LIST_NODE]
-#                 for t in self.data[DataName.LIST_TIME]
-#                 for s in self.data[DataName.LIST_SCENARIO]
-#             ) + pyo.quicksum(
-#                 self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
-#                 for j in self.data[DataName.LIST_NODE]
-#                 for t in self.data[DataName.LIST_TIME]
-#                 for s in self.data[DataName.LIST_SCENARIO]
-#             ), name='ctx_record'
-#         )
-#
-#         self.add_constr(
-#             self.var[VarName.LAG_ESTIMATOR] <= self.var[VarName.AR_VAR_OBJ] - pyo.quicksum(
-#                 self.var[VarName.LAG_MULTIPLIER][constr_name]
-#                 * (self.var[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]]
-#                    - self.main_result[self.constr_var_map[constr_name][0]][self.constr_var_map[constr_name][1]])
-#                 for constr_name in constr_name_list
-#             )
-#         )
-#
-#         self.set_objective(self.var[VarName.LAG_ESTIMATOR], sense=pyo.maximize)
-

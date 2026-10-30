@@ -13,21 +13,25 @@ if __name__ == "__main__":
         sys.path.insert(0, project_root)
 
 from algo.algo_simple_tools import CutRepetitionTracker, normalize_affine_lower_bound_row
-from algo.runner_helpers import (
-    get_branch_name,
-    get_candidate_cut_types,
-    get_phase_name,
-    should_add_integer_opt_fallback,
-    should_try_post_integer_cglp,
+from algo.interfaces import (
+    IterationContext,
+    MainSolution,
+    NoOpSolutionGenerator,
+    StaticSolutionGenerator,
 )
-from util.names import VarName
+from algo.runner import PhasePolicy
+from util.names import BranchName, CutTypeName, PhaseName, VarName
 from util.tools import load_main_stage_solution_json
 
 
-REFERENCE_SOLUTION_PATH = (
-    '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/'
-    'function_test_fixed_rated_p/solutions/s_1_s_3_s_5.json'
-)
+REFERENCE_SOLUTION_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__),
+    '..',
+    'test_local_csv_file',
+    'function_test_fixed_rated_p',
+    'solutions',
+    's_1_s_3_s_5.json',
+))
 
 
 def _assert_true(condition: bool, message: str) -> None:
@@ -92,37 +96,51 @@ def test_cut_repetition_tracker_cross_family_preview() -> None:
 
 
 def test_phase_and_branch_helpers() -> None:
-    _assert_true(get_phase_name(0, 1, 3, 5) == "phase_1", "Iteration 0 should be in phase_1")
-    _assert_true(get_phase_name(2, 1, 3, 5) == "phase_2", "Iteration 2 should be in phase_2")
-    _assert_true(get_phase_name(5, 1, 3, 5) == "phase_3", "Iteration 5 should be in phase_3")
+    policy = PhasePolicy(1, 3, 5)
+    _assert_true(policy.phase_name(0) == PhaseName.PHASE_1, "Iteration 0 should be in phase_1")
+    _assert_true(policy.phase_name(2) == PhaseName.PHASE_2, "Iteration 2 should be in phase_2")
+    _assert_true(policy.phase_name(5) == PhaseName.PHASE_3, "Iteration 5 should be in phase_3")
 
     _assert_true(
-        get_branch_name("phase_3", frac_is_repeated=True, curr_is_repeated=False) == "phase_3_repeated_frac_new_curr",
+        policy.branch_name(5, frac_repeated=True, current_repeated=False)
+        == BranchName.PHASE_3_REPEATED_FRAC_NEW_CURR,
         "Unexpected branch for repeated frac and new curr main result",
     )
     _assert_true(
-        get_candidate_cut_types("phase_3_repeated_frac_repeated_curr")[-1] == "integer_opt",
+        policy.candidate_cut_types(BranchName.PHASE_3_REPEATED_FRAC_REPEATED_CURR)[-1]
+        == CutTypeName.INTEGER_OPT,
         "Phase-3 repeated/repeated branch should include integer_opt candidate",
     )
 
 
 def test_dynamic_branch_rules() -> None:
     _assert_true(
-        should_add_integer_opt_fallback("phase_1_new_frac", any_candidate_repeated=True),
+        PhasePolicy.should_add_integer_fallback(BranchName.PHASE_1_NEW_FRAC, any_repeated=True),
         "Phase-1 new-frac branch should fall back to integer-opt when a candidate repeats",
     )
     _assert_true(
-        not should_add_integer_opt_fallback("phase_3_repeated_frac_repeated_curr", any_candidate_repeated=True),
+        not PhasePolicy.should_add_integer_fallback(
+            BranchName.PHASE_3_REPEATED_FRAC_REPEATED_CURR,
+            any_repeated=True,
+        ),
         "Phase-3 repeated/repeated branch should not use integer-opt fallback logic",
     )
     _assert_true(
-        should_try_post_integer_cglp("phase_3_repeated_frac_new_curr"),
+        PhasePolicy.should_try_post_integer_cglp(BranchName.PHASE_3_REPEATED_FRAC_NEW_CURR),
         "Phase-3 repeated-frac/new-curr branch should try the post-integer CGLP cut",
     )
     _assert_true(
-        not should_try_post_integer_cglp("phase_3_new_frac"),
+        not PhasePolicy.should_try_post_integer_cglp(BranchName.PHASE_3_NEW_FRAC),
         "Only the repeated-frac/new-curr branch should use the post-integer CGLP path",
     )
+
+
+def test_solution_generator_contracts() -> None:
+    context = IterationContext(ite_name='0')
+    solution = MainSolution(values={VarName.DG_INSTALL: {'node_1': 1}}, name='fixed')
+    _assert_true(NoOpSolutionGenerator().generate(context) == [], 'No-op generator must stay empty')
+    generated = StaticSolutionGenerator([solution]).generate(context)
+    _assert_true(generated == [solution], 'Static generator did not return its fixed anchor')
 
 
 def run_all_tests() -> None:
@@ -130,6 +148,7 @@ def run_all_tests() -> None:
     test_cut_repetition_tracker_cross_family_preview()
     test_phase_and_branch_helpers()
     test_dynamic_branch_rules()
+    test_solution_generator_contracts()
     print("dynamic_algorithm_helper_test.py: all checks passed")
 
 

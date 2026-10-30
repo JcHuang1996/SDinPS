@@ -13,8 +13,8 @@ For decomposition_algo test, additional options are available:
   --scenario-list SCENARIOS    Comma-separated list of scenarios (default: s_1,s_2,s_3)
   --time-list TIMES            Comma-separated list of time periods (default: 1,2,3,4,5,6,7,8,9,10,11)
   --test-file-path PATH        Path to test data files
-  --data-set-name NAME         Name of the data set (default: 'function test')
-  --max-iterations N            Maximum number of iterations (default: 10)
+  --data-set-name NAME         Name of the data set (default: 'function_test_fixed_rated_p')
+  --max-iterations N            Maximum number of iterations (default: 4)
 """
 
 import argparse
@@ -27,16 +27,20 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from unit_test.test_scripts.combined_formulation_test import run_combined_formulation_test
-from unit_test.test_scripts.decomposition_algo_module_test import run_decomp_module_test
+from unit_test.test_scripts.dynamic_decomposition_test import run_decomp_module_test
+from unit_test.test_scripts.micro_bench_test import run_micro_bench_test
+from model.solver_config import SolverConfig, SolverConfigSet
+from util.names import RunParameterName
 
 
 # Registry of available tests
 TEST_REGISTRY = {
     'combined_formulation': run_combined_formulation_test,
+    # 'decomposition_algo' now points at the live runner (TwoStageDecompRedo). The legacy
+    # algo/TwoStageDecomposition.py path was removed; see docs/development_record.md (P4).
     'decomposition_algo': run_decomp_module_test,
+    'micro_bench': run_micro_bench_test,
     # Add more tests here as they become available
-    # Example:
-    # 'another_test': run_another_test,
 }
 
 
@@ -56,6 +60,9 @@ def parse_list_arg(value, item_type=int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run tests for the SDinPS project')
     parser.add_argument('test_name', help='Name of the test to run')
+    parser.add_argument('--solver', default='gurobi_direct', help='Pyomo solver name')
+    parser.add_argument('--enable-pretrained-cut', action='store_true',
+                        help='Restrict decomposition to a predicted region; disables global certification')
     
     # Arguments specific to decomposition_algo test
     parser.add_argument('--enable-log-output', action='store_true',
@@ -71,7 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('--data-set-name', type=str,
                        help='Name of the data set (for decomposition_algo)')
     parser.add_argument('--max-iterations', type=int,
-                       help='Maximum number of iterations (for decomposition_algo, default: 10)')
+                       help='Maximum number of iterations (for decomposition_algo, default: 4)')
     
     args = parser.parse_args()
     
@@ -81,7 +88,10 @@ if __name__ == "__main__":
     # Call the test function
     if args.test_name == 'decomposition_algo':
         # Build kwargs for decomposition_algo test
-        kwargs = {}
+        kwargs = {
+            'solver_config_set': SolverConfigSet.build(solver_name=args.solver),
+            RunParameterName.ENABLE_PRETRAINED_CUT: args.enable_pretrained_cut,
+        }
         
         if args.enable_log_output:
             kwargs['enable_log_output'] = True
@@ -101,11 +111,14 @@ if __name__ == "__main__":
         if args.data_set_name:
             kwargs['data_set_name'] = args.data_set_name
         
-        if args.max_iterations:
+        if args.max_iterations is not None:
             kwargs['max_iterations'] = args.max_iterations
         
         run_decomp_module_test(**kwargs)
+    elif args.test_name == 'micro_bench':
+        run_micro_bench_test(solver_name=args.solver)
     else:
-        # For other tests, call without arguments
-        TEST_REGISTRY[args.test_name]()
+        run_combined_formulation_test(
+            solver_config=SolverConfig(solver_name=args.solver, mip_gap=0.01, time_limit=600),
+        )
 

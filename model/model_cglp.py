@@ -5,6 +5,7 @@
 
 
 from typing import Dict, List, Optional, Sequence, Tuple
+import math
 
 import pyomo.environ as pyo
 from pyomo.repn.standard_repn import generate_standard_repn
@@ -34,6 +35,7 @@ class ModelCGLP(ModelBase):
         model_name='cglp',
         exact_point_data=None,
         solver_config=None,
+        theta_weight_dict=None,
     ):
         super().__init__(model_name=model_name, solver_config=solver_config)
 
@@ -42,6 +44,16 @@ class ModelCGLP(ModelBase):
         self.z_var_keys = list(z_var_keys)
         self.structural_constr_names = list(structural_constr_names)
         self.theta_keys = list(theta_keys)
+
+        # Weight of each theta in the generated cut's left-hand side. The CGLP's internal epigraph
+        # variable represents whatever quantity the exact points and lower-bound rows measure, which
+        # is sum_{s in G} P_s * Q_s(x); the emitted master cut must therefore be written on
+        # sum_{s in G} P_s * theta_s. Defaults to 1.0 for standalone/unit-test use.
+        self.theta_weight_dict = (
+            {theta_key: 1.0 for theta_key in self.theta_keys}
+            if theta_weight_dict is None
+            else {theta_key: float(theta_weight_dict[theta_key]) for theta_key in self.theta_keys}
+        )
 
         self.n = len(self.x_var_keys)
 
@@ -60,7 +72,7 @@ class ModelCGLP(ModelBase):
         self.hat_v_prefix_sets = {i: set() for i in range(1, self.n + 1)}
         self.active_w_row_name_dict = {i: {} for i in range(1, self.n + 1)}
 
-        self.old_exact_point_row_name_list = []
+        self.exact_point_row_name_dict = {}
         self.current_tight_row_name = None
         self.current_tight_point = None
 
@@ -109,14 +121,32 @@ class ModelCGLP(ModelBase):
             if self._psi_var_name in self.var:
                 self._ensure_psi_var(row_name=row_name)
 
-        if self.main_row_data:
+        if 'psi_normalization' in self._constr_name_map:
             self._refresh_lower_bound_block_rows()
 
-    def update_with_exact_point(self, x_point, q_value):
-        """Add one exact epigraph point and update the incremental W-row state from Algorithm 5."""
-        considered_point = tuple(int(v) for v in x_point)
+    def update_with_exact_point(self, x_point, q_value, make_tight=True):
+        """Register/improve a certified binary-point bound, optionally selecting its tightness row."""
+        values = tuple(float(v) for v in x_point)
+        if len(values) != self.n or any(
+            not math.isfinite(v) or min(abs(v), abs(v - 1.0)) > 1e-6 for v in values
+        ):
+            raise ValueError('CGLP points must match the binary state dimension and contain only 0/1 values.')
+        considered_point = tuple(round(v) for v in values)
+        q_value = float(q_value)
+        if not math.isfinite(q_value):
+            raise ValueError('CGLP point bounds must be finite.')
 
         if considered_point in self.exact_point_value_dict:
+            if q_value > self.exact_point_value_dict[considered_point]:
+                self.exact_point_value_dict[considered_point] = q_value
+                self.update_constr_by_name(
+                    self.exact_point_row_name_dict[considered_point],
+                    self._build_exact_point_expr(
+                        considered_point, q_value, considered_point == self.current_tight_point,
+                    ),
+                )
+            if make_tight:
+                self.set_tight_point(considered_point)
             return
 
         for i in range(1, self.n + 1):
@@ -136,32 +166,44 @@ class ModelCGLP(ModelBase):
 
             current_v_i.add(bar_prefix)
 
-        if self.current_tight_row_name is not None:
-            prev_q_value = self.exact_point_value_dict[self.current_tight_point]
-            self.update_constr_by_name(
-                self.current_tight_row_name,
-                self._build_exact_point_expr(
-                    x_point=self.current_tight_point,
-                    q_value=prev_q_value,
-                    use_equality=False,
-                )
-            )
-            self.old_exact_point_row_name_list.append(self.current_tight_row_name)
-
         self.exact_point_order.append(considered_point)
-        self.exact_point_value_dict[considered_point] = float(q_value)
+        self.exact_point_value_dict[considered_point] = q_value
 
         row_name = f'exact_point_{len(self.exact_point_order)}'
+        self.exact_point_row_name_dict[considered_point] = row_name
         self.add_constr(
             self._build_exact_point_expr(
                 x_point=considered_point,
                 q_value=q_value,
-                use_equality=True,
+                use_equality=False,
             ),
             name=row_name
         )
-        self.current_tight_row_name = row_name
-        self.current_tight_point = considered_point
+        if make_tight:
+            self.set_tight_point(considered_point)
+
+    def set_tight_point(self, x_point):
+        """Move the equality to a registered point without changing the prefix sets."""
+        x_point = tuple(x_point)
+        if x_point not in self.exact_point_value_dict:
+            raise KeyError(f'CGLP point has not been evaluated: {x_point}')
+        if x_point == self.current_tight_point:
+            return
+        if self.current_tight_point is not None:
+            self.update_constr_by_name(
+                self.current_tight_row_name,
+                self._build_exact_point_expr(
+                    self.current_tight_point,
+                    self.exact_point_value_dict[self.current_tight_point],
+                    use_equality=False,
+                ),
+            )
+        self.current_tight_point = x_point
+        self.current_tight_row_name = self.exact_point_row_name_dict[x_point]
+        self.update_constr_by_name(
+            self.current_tight_row_name,
+            self._build_exact_point_expr(x_point, self.exact_point_value_dict[x_point], use_equality=True),
+        )
 
     def solve_cglp(self):
         """Solve the feasibility LP and return the cut coefficients extracted from the solution."""
@@ -183,7 +225,7 @@ class ModelCGLP(ModelBase):
             alpha, eta = self.get_cut_coefficients()
 
         lhs = pyo.quicksum(
-            model_main.var[VarName.SUB_OBJ_EST][theta_key]
+            self.theta_weight_dict[theta_key] * model_main.var[VarName.SUB_OBJ_EST][theta_key]
             for theta_key in self.theta_keys
         )
         rhs = -eta - pyo.quicksum(
@@ -431,7 +473,7 @@ class ModelCGLP(ModelBase):
         ) >= 0
 
     def _build_exact_point_expr(self, x_point, q_value, use_equality):
-        """Build the exact-point row, using equality for the newest point and inequality for older ones."""
+        """Build a point-bound row, with equality only at the selected separation anchor."""
         expr_lhs = pyo.quicksum(
             x_point[idx] * self.var[self._alpha_var_name][self.x_var_keys[idx]]
             for idx in range(self.n)

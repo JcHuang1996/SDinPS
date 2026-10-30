@@ -7,7 +7,7 @@
 Logic Check
 -----------
 This script checks the current CGLP implementation with the toy examples in
-`CGLP_node_example.md` / `CGLP_test_example.md`.
+`docs/CGLP_test_example.md`.
 
 It performs two kinds of checks:
 1. exact set-recursion checks for the paper-style 3-variable example,

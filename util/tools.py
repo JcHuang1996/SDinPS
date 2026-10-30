@@ -7,8 +7,6 @@
 import ast
 import pandas as pd
 import os
-import random
-import shutil
 import pickle
 import json
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,11 +19,11 @@ def enrich_iter_general_dataframe(
     drop_existing_best_rows: bool = True,
 ) -> pd.DataFrame:
     """
-    Add column ``gap`` = (best_incumbent_obj_value - best_bound_objective_value) / best_incumbent_obj_value
-    when both values are numeric and incumbent is nonzero; otherwise gap is NaN.
+    Add ``gap`` = (best_incumbent_obj_value - valid_lower_bound) / abs(best_incumbent_obj_value).
+    Missing certified bounds leave the gap blank; a zero incumbent and zero bound give zero gap.
 
     Append a summary row with ite_num == 'best', best_incumbent_obj_value = min(incumbent column),
-    best_bound_objective_value = max(bound column). Other columns on that row are left empty.
+    valid_lower_bound = max(certified bound column), plus the independent diagnostic maximum.
 
     If ``drop_existing_best_rows`` is True, rows whose ite_num string-equals 'best' are dropped first
     (so re-running on an already-enriched file does not duplicate the summary row).
@@ -51,14 +49,16 @@ def enrich_iter_general_dataframe(
         else pd.Series(pd.NA, index=out.index, dtype="Float64")
     )
     bnd = (
-        pd.to_numeric(out["best_bound_objective_value"], errors="coerce")
-        if "best_bound_objective_value" in out.columns
+        pd.to_numeric(out["valid_lower_bound"], errors="coerce")
+        if "valid_lower_bound" in out.columns
         else pd.Series(pd.NA, index=out.index, dtype="Float64")
     )
 
+    bnd = bnd.replace([float('inf'), -float('inf')], pd.NA)
     valid = inc.notna() & bnd.notna() & (inc != 0)
     gap = pd.Series(pd.NA, index=out.index, dtype="Float64")
-    gap.loc[valid] = (inc.loc[valid] - bnd.loc[valid]) / inc.loc[valid]
+    gap.loc[valid] = (inc.loc[valid] - bnd.loc[valid]) / inc.loc[valid].abs()
+    gap.loc[(inc == 0) & (bnd == 0)] = 0.0
     out["gap"] = gap
 
     # column order: gap immediately after best_bound_objective_value when present
@@ -74,7 +74,9 @@ def enrich_iter_general_dataframe(
     max_bnd = bnd.max(skipna=True)
     best_gap = float("nan")
     if pd.notna(min_inc) and pd.notna(max_bnd) and float(min_inc) != 0.0:
-        best_gap = (float(min_inc) - float(max_bnd)) / float(min_inc)
+        best_gap = (float(min_inc) - float(max_bnd)) / abs(float(min_inc))
+    elif pd.notna(min_inc) and pd.notna(max_bnd) and float(min_inc) == float(max_bnd) == 0.0:
+        best_gap = 0.0
 
     # Use float NaN for non-labeled cells so concat dtypes stay stable (avoids all-NA FutureWarning).
     summary = {c: float("nan") for c in out.columns}
@@ -82,7 +84,10 @@ def enrich_iter_general_dataframe(
     if "best_incumbent_obj_value" in out.columns:
         summary["best_incumbent_obj_value"] = float(min_inc) if pd.notna(min_inc) else float("nan")
     if "best_bound_objective_value" in out.columns:
-        summary["best_bound_objective_value"] = float(max_bnd) if pd.notna(max_bnd) else float("nan")
+        diagnostic = pd.to_numeric(out["best_bound_objective_value"], errors="coerce").max(skipna=True)
+        summary["best_bound_objective_value"] = diagnostic
+    if "valid_lower_bound" in out.columns:
+        summary["valid_lower_bound"] = float(max_bnd) if pd.notna(max_bnd) else float("nan")
     if "gap" in out.columns:
         summary["gap"] = best_gap
 
@@ -102,25 +107,12 @@ def write_iter_general_enriched_csv(df: pd.DataFrame, path: str) -> str:
     return path
 
 
-def write_iter_general_update_from_iter_general_path(iter_general_csv_path: str) -> str:
-    """
-    Read ``iter_general_info.csv`` (or same layout), enrich with gap + 'best' row, write
-    ``iter_general_update.csv`` in the same directory. Returns path to the new file.
-    """
-    df = pd.read_csv(iter_general_csv_path, dtype={"ite_num": str}, keep_default_na=True)
-    enriched = enrich_iter_general_dataframe(df, drop_existing_best_rows=True)
-    out_dir = os.path.dirname(os.path.abspath(iter_general_csv_path))
-    out_path = os.path.join(out_dir, "iter_general_update.csv")
-    write_iter_general_enriched_csv(enriched, out_path)
-    return out_path
-
-
 def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
     """
     Write or overwrite iter_general_info.csv from ite_obj_value_dict.
 
-    Each row includes ``gap`` = (incumbent - bound) / incumbent when both are present and incumbent != 0,
-    plus a trailing summary row with ``ite_num`` == 'best' (min incumbent, max bound over the run).
+    Each row includes a gap from its certified lower bound when available, plus a trailing summary
+    row with ``ite_num`` == 'best' (min incumbent, max certified bound over the run).
     ``ite_num`` is written as text so iteration indices and 'best' stay unambiguous in CSV.
     Handles empty dict (header-only plus best row).
     """
@@ -134,7 +126,11 @@ def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
         record = {
             'ite_num': ite_num,
             'best_incumbent_obj_value': incumbent,
-            'best_bound_objective_value': bound_total
+            # Diagnostic design + sum P_s theta_s at the master incumbent; a certificate is
+            # reported separately in valid_lower_bound (including under incomplete solves).
+            'best_bound_objective_value': bound_total,
+            'valid_lower_bound': bound_data.get('valid_lower_bound', None),
+            'added_obj_term_weight': bound_data.get('added_obj_term_weight', None),
         }
         # merge cost components
         record.update(detail_dict)
@@ -151,9 +147,12 @@ def iter_general_csv(ite_obj_value_dict=None, output_dir=None):
 def iter_sub_prob_info(ite_obj_value_dict=None, output_dir=None, scenario_list=None):
     """Write or overwrite iter_subproblem_info.csv from ite_obj_value_dict. Handles empty dict (header-only)."""
     sub_records = []
+    scenario_set = set(scenario_list)
     for ite_num in ite_obj_value_dict:
-        for s in scenario_list:
-            sub_info = ite_obj_value_dict[ite_num].get(tuple([s]), {})
+        for group, sub_info in ite_obj_value_dict[ite_num].items():
+            if not isinstance(group, tuple) or not set(group).issubset(scenario_set):
+                continue
+            s = group[0] if len(group) == 1 else json.dumps(list(group))
             sub_total = sub_info.get('total', None)
             sub_detail = sub_info.get('detail', {})
             record = {'ite_num': ite_num, 'scenario': s}
@@ -353,21 +352,6 @@ def report_repetitive_cuts(
     )
 
 
-def load_warm_start(path):
-    df = pd.read_csv(path)
-    out = {}
-    for i, row in df.iterrows():
-        xg = {c: int(row[c]) for c in df.columns if c.startswith("node_") and "-" not in c}
-        xl = {(a, b): int(row[f"{a}-{b}"])
-              for c in df.columns if "-" in c
-              for a, b in [c.split("-")]}
-        out[f"w_{i+1}"] = {
-            "xg": xg,
-            # "xl": xl
-        }
-    return out
-
-
 def load_main_stage_solution_json(path: str) -> Dict[str, Dict[Any, Any]]:
     """
     Load a main-stage solution JSON into the nested dict shape returned by model_main.get_result(...).
@@ -386,163 +370,3 @@ def load_main_stage_solution_json(path: str) -> Dict[str, Dict[Any, Any]]:
             out[var_name][key] = raw_value
 
     return out
-
-
-def data_perturbation(file_path, perturb_type, sim_num, node_num=1, load_percent=0.1, line_num=1):
-    """
-    Generate random perturbations on CSV datasets in the origin folder.
-    
-    Args:
-        file_path: Path to the folder containing the 'origin' subfolder
-        perturb_type: Type of perturbation ('load' or 'broken')
-        sim_num: Number of perturbed datasets to generate
-        node_num: Number of nodes to perturb per scenario for 'load' type (default: 1)
-        load_percent: Percentage range for load perturbation for 'load' type (default: 0.1)
-        line_num: Number of lines to perturb per scenario for 'broken' type (default: 1)
-    
-    Returns:
-        None. Creates a folder containing subfolders p_1, p_2, ..., p_sim_num with modified datasets.
-        For 'load' type: folder named 'sim_num_node_num_load_percent'
-        For 'broken' type: folder named 'line_num'
-    """
-    origin_path = os.path.join(file_path, 'origin')
-    
-    # Get all files in origin folder to copy
-    origin_files = [f for f in os.listdir(origin_path) if os.path.isfile(os.path.join(origin_path, f))]
-    
-    # Determine intermediate folder name based on perturbation type
-    if perturb_type == 'load':
-        intermediate_folder = os.path.join(file_path, f'{sim_num}_{node_num}_{load_percent}')
-        # Read the original load CSV
-        load_csv_name = 's_load_P3715kW_system.csv'
-        load_csv_path = os.path.join(origin_path, load_csv_name)
-        df_load = pd.read_csv(load_csv_path)
-    elif perturb_type == 'broken':
-        intermediate_folder = os.path.join(file_path, str(line_num))
-        # Read the original line state CSV
-        line_state_csv_name = 's_line_state_w_o_harden.csv'
-        line_state_csv_path = os.path.join(origin_path, line_state_csv_name)
-        df_line_state = pd.read_csv(line_state_csv_path)
-    else:
-        raise ValueError(f"Unsupported perturb_type: {perturb_type}")
-    
-    os.makedirs(intermediate_folder, exist_ok=True)
-    
-    # Generate sim_num perturbed datasets
-    for sim_idx in range(1, sim_num + 1):
-        # Create output folder inside the intermediate folder
-        output_folder = os.path.join(intermediate_folder, f'p_{sim_idx}')
-        os.makedirs(output_folder, exist_ok=True)
-        
-        # Copy all files from origin to output folder
-        for file_name in origin_files:
-            src_path = os.path.join(origin_path, file_name)
-            dst_path = os.path.join(output_folder, file_name)
-            shutil.copy2(src_path, dst_path)
-        
-        # Apply perturbation based on type
-        if perturb_type == 'load':
-            _apply_load_perturbation(df_load, output_folder, load_csv_name, node_num, load_percent)
-        elif perturb_type == 'broken':
-            _apply_broken_perturbation(df_line_state, output_folder, line_state_csv_name, line_num)
-
-
-def _apply_load_perturbation(df_load, output_folder, load_csv_name, node_num, load_percent):
-    """Apply load perturbation to the dataset."""
-    # Create a copy of the load dataframe for modification
-    df_perturbed = df_load.copy()
-    
-    # Group by scenario_id
-    for scenario_id, group in df_perturbed.groupby('scenario_id'):
-        # Get all nodes for this scenario, excluding node_1
-        available_nodes = group[group['node'] != 'node_1']['node'].unique().tolist()
-        
-        # Randomly select node_num nodes (or all available if fewer)
-        num_to_select = min(node_num, len(available_nodes))
-        selected_nodes = random.sample(available_nodes, num_to_select)
-        
-        # Apply perturbation to selected nodes
-        for node in selected_nodes:
-            # Generate random multiplier between (1 - load_percent) and (1 + load_percent)
-            multiplier = random.uniform(1 - load_percent, 1 + load_percent)
-            
-            # Apply multiplier to both P and Q load for this node in this scenario
-            mask = (df_perturbed['scenario_id'] == scenario_id) & (df_perturbed['node'] == node)
-            df_perturbed.loc[mask, 'P_LOAD_MW'] *= multiplier
-            df_perturbed.loc[mask, 'Q_LOAD_MW'] *= multiplier
-    
-    # Save the perturbed load CSV
-    perturbed_load_path = os.path.join(output_folder, load_csv_name)
-    df_perturbed.to_csv(perturbed_load_path, index=False)
-
-
-def _apply_broken_perturbation(df_line_state, output_folder, line_state_csv_name, line_num):
-    """Apply broken line perturbation to the dataset."""
-    # Create a copy of the line state dataframe for modification
-    df_perturbed = df_line_state.copy()
-    
-    # Group by scenario_id
-    for scenario_id, group in df_perturbed.groupby('scenario_id'):
-        # Get unique lines (from_bus, to_bus pairs) for this scenario as tuples
-        unique_lines = [tuple(row) for row in group[['from_bus', 'to_bus']].drop_duplicates().values]
-        
-        # Randomly select line_num lines (or all available if fewer)
-        num_to_select = min(line_num, len(unique_lines))
-        selected_lines = random.sample(unique_lines, num_to_select)
-        
-        # Apply perturbation to selected lines
-        for selected_line in selected_lines:
-            from_bus, to_bus = selected_line
-            
-            # Find adjacent lines (lines that share a node with the selected line)
-            adjacent_lines = []
-            for line in unique_lines:
-                other_from, other_to = line
-                # Check if lines share a node (adjacent) and are different
-                if (line != selected_line and 
-                    (from_bus == other_from or from_bus == other_to or 
-                     to_bus == other_from or to_bus == other_to)):
-                    adjacent_lines.append(line)
-            
-            # If no adjacent lines found, skip this line
-            if not adjacent_lines:
-                continue
-            
-            # Randomly pick one adjacent line
-            adjacent_line = random.choice(adjacent_lines)
-            adj_from, adj_to = adjacent_line
-            
-            # Exchange state_no_harden and state_harden between the two lines
-            # Get all rows for both lines in this scenario
-            mask_line1 = ((df_perturbed['scenario_id'] == scenario_id) & 
-                         (df_perturbed['from_bus'] == from_bus) & 
-                         (df_perturbed['to_bus'] == to_bus))
-            mask_line2 = ((df_perturbed['scenario_id'] == scenario_id) & 
-                         (df_perturbed['from_bus'] == adj_from) & 
-                         (df_perturbed['to_bus'] == adj_to))
-            
-            # Exchange the states
-            temp_no_harden = df_perturbed.loc[mask_line1, 'state_no_harden'].copy()
-            temp_harden = df_perturbed.loc[mask_line1, 'state_harden'].copy()
-            
-            df_perturbed.loc[mask_line1, 'state_no_harden'] = df_perturbed.loc[mask_line2, 'state_no_harden'].values
-            df_perturbed.loc[mask_line1, 'state_harden'] = df_perturbed.loc[mask_line2, 'state_harden'].values
-            
-            df_perturbed.loc[mask_line2, 'state_no_harden'] = temp_no_harden.values
-            df_perturbed.loc[mask_line2, 'state_harden'] = temp_harden.values
-    
-    # Save the perturbed line state CSV
-    perturbed_line_state_path = os.path.join(output_folder, line_state_csv_name)
-    df_perturbed.to_csv(perturbed_line_state_path, index=False)
-
-
-if __name__ == '__main__':
-    load_perturb_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/sensitive_load'
-    broken_perturb_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/sensitive_broken'
-    sim_num = 10
-    node_num = 1
-    load_percent = 0.1
-    line_num = 2
-
-    data_perturbation(load_perturb_path, 'load', sim_num, node_num=node_num, load_percent=load_percent)
-    data_perturbation(broken_perturb_path, 'broken', sim_num, line_num=line_num)

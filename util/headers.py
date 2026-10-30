@@ -63,7 +63,7 @@ class ParameterKey:
     DG_PF_LB = 'dg_pf_lb'
 
     SLACK_NODE_IDX = 'slack_node'   # str, the index of the slack node of the system
-    TOTAL_POWER = 'total_power'     # optional explicit big-M value for voltage-flow constraints
+    TOTAL_POWER = 'total_power'     # legacy input; operating bounds use line/voltage limits
 
 
 class ScenarioNodePowerHeader:

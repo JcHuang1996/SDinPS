@@ -33,6 +33,15 @@ logger = logging.getLogger(__name__)
 
 class ModelCombined(ModelBase):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._formulation_adapter = None
+
+    def get_formulation_adapter(self):
+        if self._formulation_adapter is None:
+            self._formulation_adapter = make_full_formulation_adapter(self.data)
+        return self._formulation_adapter
+
     def build_model_all_obj_terms(self):
         self.add_vars()
         self.add_constraints()
@@ -71,13 +80,13 @@ class ModelCombined(ModelBase):
         add_line_design_vars(self)
 
     def add_vars_sys_topology(self):
-        add_topology_vars(self, make_full_formulation_adapter(self.data))
+        add_topology_vars(self, self.get_formulation_adapter())
 
     def add_vars_line_connectivity(self):
-        add_line_connectivity_vars(self, make_full_formulation_adapter(self.data))
+        add_line_connectivity_vars(self, self.get_formulation_adapter())
 
     def add_vars_sys_operating(self):
-        add_operating_vars(self, make_full_formulation_adapter(self.data))
+        add_operating_vars(self, self.get_formulation_adapter())
 
     def add_constr_DG_ub(self):
         add_dg_install_constraints(self)
@@ -86,23 +95,22 @@ class ModelCombined(ModelBase):
         add_dg_rated_power_link_constraints(self, ConstrName.DG_OPERATION)
 
     def add_constr_line_connectivity(self):
-        add_line_connectivity_constraints(self, make_full_formulation_adapter(self.data))
+        add_line_connectivity_constraints(self, self.get_formulation_adapter())
 
     def add_constr_system_topology_constraints(self):
-        add_topology_constraints(self, make_full_formulation_adapter(self.data))
+        add_topology_constraints(self, self.get_formulation_adapter())
 
     def add_constr_DG_operating(self):
-        add_dg_operating_constraints(self, make_full_formulation_adapter(self.data))
+        add_dg_operating_constraints(self, self.get_formulation_adapter())
 
     def add_constr_system_operating(self):
-        add_operating_constraints(self, make_full_formulation_adapter(self.data))
+        add_operating_constraints(self, self.get_formulation_adapter())
 
     def derive_obj_terms(self):
-        adapter = make_full_formulation_adapter(self.data)
         add_design_objective_terms(self)
         add_operating_objective_terms(
             self,
-            adapter=adapter,
+            adapter=self.get_formulation_adapter(),
             dg_obj_name=ObjName.DG_GENERATING_COST,
             load_shed_obj_name=ObjName.LOAD_SHED_COST,
         )

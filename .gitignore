@@ -172,3 +172,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project-local (2026-10-29 cleanup): run outputs stay untracked; the runs that back the
+# Final Report are listed in docs/development_record.md (Section 8).
+output/
+logs/
+.DS_Store
+.idea/

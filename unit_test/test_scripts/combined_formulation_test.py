@@ -19,6 +19,7 @@ from util.topo_visual import net_topo_preview_with_results
 from dao.data_reader import DataReader
 from dao.data_processor import DataProcessor
 from model.model_combined import ModelCombined
+from model.solver_config import SolverConfig
 
 import math
 import logging
@@ -28,12 +29,13 @@ logger = logging.getLogger(__name__)
 
 
 def run_combined_formulation_test(
-    test_file_path: str = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file',
+    test_file_path: str = None,
     data_set_name: str = 'function_test_fixed_rated_p',
     scenario_list_assigned: list = None,
     time_list_assigned: list = None,
     output_path: str = None,
-    generate_plot: bool = True
+    generate_plot: bool = True,
+    solver_config: SolverConfig = None,
 ):
     """Run the combined formulation test.
     
@@ -45,6 +47,8 @@ def run_combined_formulation_test(
         output_path: Optional path to save the visualization. If provided, the directory will be created if it doesn't exist.
         generate_plot: Whether to generate and display the plot. Default: True.
     """
+    if test_file_path is None:
+        test_file_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'test_local_csv_file'))
     if scenario_list_assigned is None:
         scenario_list_assigned = ['s_1', 's_2', 's_3', 's_4', 's_5', 's_6']
     if time_list_assigned is None:
@@ -69,15 +73,11 @@ def run_combined_formulation_test(
 
     print('Data processing completed.')
 
-    m_combined = ModelCombined(model_name='m_combined_test', model_data=processed_data)
-    m_combined.build_model_all_obj_terms()
-
-    m_combined.set_parameters(
-        param_dict={
-            'MIPGap': 0.01,
-            'TimeLimit': 600,
-        }
+    m_combined = ModelCombined(
+        model_name='m_combined_test', model_data=processed_data,
+        solver_config=solver_config or SolverConfig(mip_gap=0.01, time_limit=600),
     )
+    m_combined.build_model_all_obj_terms()
 
     m_combined.solve()
     m_combined.cal_detailed_obj()

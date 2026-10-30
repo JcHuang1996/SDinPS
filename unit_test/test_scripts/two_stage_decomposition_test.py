@@ -7,17 +7,30 @@
 import os
 import sys
 
-from algo.two_stage_decomp_redo import TwoStageDecompRedo
-from algo.algo_simple_tools import detect_and_record_repetition
-from algo.runner_helpers import IncumbentTracker, setup_pretrained_cut
-
 if __name__ == "__main__":
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+from algo.two_stage_decomp_redo import TwoStageDecompRedo
+from algo.interfaces import AggregationPolicy, SolutionGenerator
+from algo.runner import CutSchedule, DecompositionRunner
+from algo.runner_helpers import (
+    setup_pretrained_cut,
+    validate_bound_mode as _validate_bound_mode,
+)
+from model.solver_config import SolverConfigSet
+
 from util.project_logger import init_logger
-from util.names import VarName, InputMethodName, MainProblemHatDataMethodName, MainProblemModelTypeName
+from util.names import (
+    BoundModeName,
+    CutTypeName,
+    InputMethodName,
+    MainProblemHatDataMethodName,
+    MainProblemModelTypeName,
+    ResultName,
+    RunParameterName,
+)
 from dao.data_reader import DataReader
 
 from util.converge_visual import plot_iter_obj_curves
@@ -30,7 +43,6 @@ from util.tools import (
 )
 
 from datetime import datetime
-import copy
 import logging
 from typing import Optional, Tuple
 
@@ -57,7 +69,7 @@ def run_decomp_module_test(
     time_list=None,
     test_read_method=None,
     test_file_path=None,
-    data_set_name='function_test',
+    data_set_name='function_test_fixed_rated_p',
     max_iterations=4,
     output_label=None,
     benders_cut_iter_range: Optional[Tuple[int, int]] = None,
@@ -70,6 +82,12 @@ def run_decomp_module_test(
     main_problem_model_type: str = MainProblemModelTypeName.COLLAPSED_NO_TIME,
     main_problem_hat_data_method: str = MainProblemHatDataMethodName.WEIGHTED_AVERAGE,
     added_obj_term_weight: float = 0.0,
+    bound_mode: str = BoundModeName.RESOLVE_AT_ZERO_WEIGHT,
+    convergence_rel_gap: float = 0.01,
+    solver_config_set: Optional[SolverConfigSet] = None,
+    reference_objective_value: Optional[float] = None,
+    solution_generator: Optional[SolutionGenerator] = None,
+    enable_pretrained_cut: bool = False,
 ):
     """Run the decomposition module test.
 
@@ -79,8 +97,8 @@ def run_decomp_module_test(
         scenario_list: List of scenarios to test (default: ['s_1', 's_2', 's_3'])
         time_list: List of time periods (default: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
         test_read_method: Input method for reading data (default: InputMethodName.LOCAL_CSV)
-        test_file_path: Path to test data files (default: '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file')
-        data_set_name: Name of the data set (default: 'function test')
+        test_file_path: Path to test data files (default: <repo>/unit_test/test_local_csv_file)
+        data_set_name: Name of the data set (default: 'function_test_fixed_rated_p')
         max_iterations: Maximum number of iterations to run (default: 10)
         benders_cut_iter_range: (first_iter, last_iter) to add Benders cuts; None to skip.
         strengthen_benders_cut_iter_range: (first_iter, last_iter) to add strengthened Benders cuts; None to skip.
@@ -91,9 +109,8 @@ def run_decomp_module_test(
             iterations (0, k, 2k, ...). If None, record every iteration. When not recording, solve_sub_model() is
             skipped and Benders cut uses relaxed LP objective (get_relaxed_obj_value()); strengthen/Lagrangian
             cuts are unchanged (they use curr_sub_frac_model only, not current_sub_model).
-        use_aggregated_cuts: If False, generate and add one cut per scenario group (sub_sce_list). If True,
-            collect (lhs, rhs, weight) for each group with weight = sum of scenario probabilities, then add
-            exactly one cut per iteration per cut type using probability-weighted lhs and rhs.
+        use_aggregated_cuts: Add the sum of the already probability-weighted group cuts.
+        enable_pretrained_cut: Restrict the search to the predicted region; disables global bounds.
         main_problem_model_type: Selected main-problem model variant.
         main_problem_hat_data_method: Method used to collapse time/scenario-dependent data for the enriched main model.
         added_obj_term_weight: Scalar weight of the added master-only operating objective terms.
@@ -117,9 +134,11 @@ def run_decomp_module_test(
     if test_read_method is None:
         test_read_method = InputMethodName.LOCAL_CSV
     if test_file_path is None:
-        test_file_path = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file'
+        test_file_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', 'test_local_csv_file')
+        )
     if data_set_name is None:
-        data_set_name = 'function_test'
+        data_set_name = 'function_test_fixed_rated_p'
     if enable_result_output is None:
         enable_result_output = False
 
@@ -135,11 +154,6 @@ def run_decomp_module_test(
 
     if record_incumbent_every_k is not None and (not isinstance(record_incumbent_every_k, int) or record_incumbent_every_k < 1):
         raise ValueError("record_incumbent_every_k must be a positive integer or None")
-    if use_aggregated_cuts and cglp_cut_iter_range is not None:
-        raise NotImplementedError("CGLP cuts are only wired for use_aggregated_cuts=False.")
-    if use_aggregated_cuts and integer_opt_cut_iter_range is not None:
-        raise NotImplementedError("Integer optimality cuts are only wired for use_aggregated_cuts=False.")
-
     init_logger(enable_file_output=enable_log_output)
 
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -160,10 +174,15 @@ def run_decomp_module_test(
 
     data_read_path = test_file_path + '/' + data_set_name + '/'
 
+    if solver_config_set is None:
+        solver_config_set = SolverConfigSet.build()
+    _validate_bound_mode(bound_mode)
+
     two_stage_decomp_module = TwoStageDecompRedo(
         raw_data=r.raw_data,
         time_list=time_list,
         scenario_list=scenario_list,
+        solver_config_set=solver_config_set,
     )
     two_stage_decomp_module.data_processor_module.main_problem_model_type = main_problem_model_type
     two_stage_decomp_module.data_processor_module.main_problem_hat_data_method = main_problem_hat_data_method
@@ -172,143 +191,77 @@ def run_decomp_module_test(
     two_stage_decomp_module.build_main_stage_model()
     two_stage_decomp_module.model_main.set_added_obj_term_weight(added_obj_term_weight)
 
-    setup_pretrained_cut(
-        two_stage_decomp_module=two_stage_decomp_module,
-        dataset_path=data_read_path,
-        scenario_list=scenario_list,
-        hat=0.3334,
-        use_fallback_partition=False,
-        logger=logger,
-    )
+    pretrained_info = {'added': False}
+    if enable_pretrained_cut:
+        pretrained_info = setup_pretrained_cut(
+            two_stage_decomp_module=two_stage_decomp_module,
+            dataset_path=data_read_path,
+            scenario_list=scenario_list,
+            hat=0.3334,
+            use_fallback_partition=False,
+            logger=logger,
+        )
+    logger.info('Pretrained restrictions enabled=%s, added=%s',
+                enable_pretrained_cut, pretrained_info['added'])
 
     # decide how to group and iterate the scenarios
     sce_group_list = [
         [s] for s in scenario_list
     ]
 
-    incumbent_tracker = IncumbentTracker()
-    curr_main_result_history = []
-    frac_main_result_history = []
-    curr_main_repetition_records = []
-    frac_main_repetition_records = []
-    curr_main_seen_signatures = {}
-    frac_main_seen_signatures = {}
     if enable_result_output:
         two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
-
-    for ite_num in range(max_iterations):
-
-        logger.info(f"Current iteration: {ite_num}")
-
-        ite_name = str(ite_num)
-        # solve main model
-        two_stage_decomp_module.solve_main_stage_model()
-
-        # record the main model result
-        main_stage_obj, main_bound = two_stage_decomp_module.record_main_stage_model(ite_name=ite_name)
-
-        # record the result of the main model required by the sub problems
-        curr_main_result = two_stage_decomp_module.model_main.get_result([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
-
-        do_record_incumbent = record_incumbent_every_k is None or ite_num % record_incumbent_every_k == 0
-
-        # the following part aims on collecting relaxed solution from main problem for better cut
-        two_stage_decomp_module.solve_main_stage_relaxed_model()
-        frac_main_result = two_stage_decomp_module.model_main.get_result_relaxed([VarName.DG_INSTALL, VarName.LINE_HARDEN, VarName.DG_INSTALL_TYPE])
-
-        curr_is_repeated, curr_first_seen_ite = detect_and_record_repetition(
-            value=curr_main_result,
-            seen_signatures=curr_main_seen_signatures,
-            iteration=ite_num,
-            tol=1e-6,
-        )
-        curr_main_repetition_records.append({
-            "iteration": ite_num,
-            "is_repeated": curr_is_repeated,
-            "first_seen_iteration": curr_first_seen_ite,
-        })
-        frac_is_repeated, frac_first_seen_ite = detect_and_record_repetition(
-            value=frac_main_result,
-            seen_signatures=frac_main_seen_signatures,
-            iteration=ite_num,
-            tol=1e-6,
-        )
-        frac_main_repetition_records.append({
-            "iteration": ite_num,
-            "is_repeated": frac_is_repeated,
-            "first_seen_iteration": frac_first_seen_ite,
-        })
-        curr_main_result_history.append(copy.deepcopy(curr_main_result))
-        frac_main_result_history.append(copy.deepcopy(frac_main_result))
-
-        sce_prob = two_stage_decomp_module.sce_prob_dict
-        incumbent_records = [] if do_record_incumbent else None
-
-        if use_aggregated_cuts:
-            two_stage_decomp_module.run_iteration_cuts_aggregated(
-                sce_group_list=sce_group_list,
-                ite_name=ite_name,
-                ite_num=ite_num,
-                curr_main_result=curr_main_result,
-                frac_main_result=frac_main_result,
-                benders_cut_iter_range=benders_cut_iter_range,
-                strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
-                lagrangian_cut_iter_range=lagrangian_cut_iter_range,
-                cglp_cut_iter_range=cglp_cut_iter_range,
-                main_stage_obj=main_stage_obj if do_record_incumbent else None,
-                incumbent_records=incumbent_records,
-                max_lagrangian_ite=10,
-            )
-        else:
-            two_stage_decomp_module.run_iteration_cuts_per_scenario(
-                sce_group_list=sce_group_list,
-                ite_name=ite_name,
-                ite_num=ite_num,
-                curr_main_result=curr_main_result,
-                frac_main_result=frac_main_result,
-                benders_cut_iter_range=benders_cut_iter_range,
-                strengthen_benders_cut_iter_range=strengthen_benders_cut_iter_range,
-                lagrangian_cut_iter_range=lagrangian_cut_iter_range,
-                cglp_cut_iter_range=cglp_cut_iter_range,
-                integer_opt_cut_iter_range=integer_opt_cut_iter_range,
-                main_stage_obj=main_stage_obj if do_record_incumbent else None,
-                incumbent_records=incumbent_records,
-                max_lagrangian_ite=10,
-            )
-
-        if incumbent_records is not None:
-            incumbent_tracker.update_from_records(
-                two_stage_decomp_module=two_stage_decomp_module,
-                ite_name=ite_name,
-                sce_prob=sce_prob,
-                incumbent_records=incumbent_records,
-            )
-        if enable_result_output:
-            two_stage_decomp_module.write_iteration_csvs(output_dir=output_dir, scenario_list=scenario_list)
-        if do_record_incumbent and incumbent_tracker.has_converged(main_bound=main_bound, rel_gap=0.01):
-            logger.info(f'Ite {ite_name} has reached convergence by the gap of 1%')
-            break
-
-    two_stage_decomp_module.model_main.write_file(file_name=output_dir+'/main_model.lp')
-
-    write_decomp_run_parameters(
+    runner = DecompositionRunner(
+        two_stage_decomp_module=two_stage_decomp_module,
+        scenario_groups=sce_group_list,
+        max_iterations=max_iterations,
+        cut_schedule=CutSchedule(ranges={
+            CutTypeName.BENDERS: benders_cut_iter_range,
+            CutTypeName.STRENGTHEN_BENDERS: strengthen_benders_cut_iter_range,
+            CutTypeName.LAGRANGIAN: lagrangian_cut_iter_range,
+            CutTypeName.CGLP: cglp_cut_iter_range,
+            CutTypeName.INTEGER_OPT: integer_opt_cut_iter_range,
+        }),
+        aggregation_policy=(
+            AggregationPolicy.AGGREGATE if use_aggregated_cuts else AggregationPolicy.PER_GROUP
+        ),
+        added_obj_term_weight=added_obj_term_weight,
+        bound_mode=bound_mode,
+        convergence_rel_gap=convergence_rel_gap,
+        record_incumbent_every_k=record_incumbent_every_k,
+        enable_result_output=enable_result_output,
         output_dir=output_dir,
-        params={
-            "scenario_list": scenario_list,
-            "data_set_name": data_set_name,
-            "max_iterations": max_iterations,
-            "benders_cut_iter_range": benders_cut_iter_range,
-            "strengthen_benders_cut_iter_range": strengthen_benders_cut_iter_range,
-            "lagrangian_cut_iter_range": lagrangian_cut_iter_range,
-            "cglp_cut_iter_range": cglp_cut_iter_range,
-            "integer_opt_cut_iter_range": integer_opt_cut_iter_range,
-            "record_incumbent_every_k": record_incumbent_every_k,
-            "use_aggregated_cuts": use_aggregated_cuts,
-            "main_problem_model_type": main_problem_model_type,
-            "main_problem_hat_data_method": main_problem_hat_data_method,
-            "added_obj_term_weight": added_obj_term_weight,
-        },
+        solution_generator=solution_generator,
     )
+    run_result = runner.run()
+    incumbent_tracker = runner.incumbent
+    iteration_bound_records = run_result['iteration_bound_records']
+    curr_main_result_history = run_result['current_solution_history']
+    frac_main_result_history = run_result['fractional_solution_history']
+    curr_main_repetition_records = run_result['current_repetition_records']
+    frac_main_repetition_records = run_result['fractional_repetition_records']
+
+    if enable_result_output:
+        write_decomp_run_parameters(
+            output_dir=output_dir,
+            params={
+                RunParameterName.ENABLE_PRETRAINED_CUT: enable_pretrained_cut,
+                RunParameterName.PRETRAINED_CUT_ADDED: pretrained_info['added'],
+                "scenario_list": scenario_list,
+                "data_set_name": data_set_name,
+                "max_iterations": max_iterations,
+                "benders_cut_iter_range": benders_cut_iter_range,
+                "strengthen_benders_cut_iter_range": strengthen_benders_cut_iter_range,
+                "lagrangian_cut_iter_range": lagrangian_cut_iter_range,
+                "cglp_cut_iter_range": cglp_cut_iter_range,
+                "integer_opt_cut_iter_range": integer_opt_cut_iter_range,
+                "record_incumbent_every_k": record_incumbent_every_k,
+                "use_aggregated_cuts": use_aggregated_cuts,
+                "main_problem_model_type": main_problem_model_type,
+                "main_problem_hat_data_method": main_problem_hat_data_method,
+                "added_obj_term_weight": added_obj_term_weight,
+            },
+        )
 
     if enable_result_output and incumbent_tracker.best_sub_results is not None:
         write_power_usage_capacity_ratio(
@@ -333,14 +286,20 @@ def run_decomp_module_test(
         )
 
     # after finishing the algorithm
-    plot_iter_obj_curves(
-        ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
-        output_dir=output_dir,
-        real_objective_value=3239346
-    )
+    if enable_result_output:
+        plot_iter_obj_curves(
+            ite_obj_value_dict=two_stage_decomp_module.ite_obj_value_dict,
+            output_dir=output_dir,
+            real_objective_value=reference_objective_value,
+        )
     return {
         "repetitive_cut_count": len(repetitive_cut_records),
         "repetitive_cut_records": repetitive_cut_records,
+        "iteration_bound_records": iteration_bound_records,
+        ResultName.BEST_INCUMBENT_OBJ: incumbent_tracker.best_obj,
+        ResultName.BEST_MAIN_SOLUTION: run_result[ResultName.BEST_MAIN_SOLUTION],
+        ResultName.BEST_INCUMBENT_SOURCE: run_result[ResultName.BEST_INCUMBENT_SOURCE],
+        "two_stage_decomp_module": two_stage_decomp_module,
     }
 
 

@@ -6,6 +6,7 @@
 import ast
 import json
 import logging
+import math
 import os
 from typing import Dict, List, Sequence, Tuple, Optional, Any
 
@@ -62,6 +63,8 @@ def build_cut_signature_from_row(
     row: dict,
     tol: float = DEFAULT_CUT_SIGNATURE_TOL,
     include_cut_type: bool = True,
+    theta_weights: Optional[dict] = None,
+    sub_sce_list: Optional[Sequence] = None,
 ):
     """
     Build a deterministic signature for a cut row independent of cut name.
@@ -70,6 +73,11 @@ def build_cut_signature_from_row(
         "x_coef": row.get("x_coef", {}),
         "rhs": float(row.get("rhs", 0.0)),
     }
+    # Equal right-hand sides on different theta variables are different inequalities.
+    if theta_weights is not None:
+        payload['theta_coef'] = theta_weights
+    else:
+        payload['scenario_group'] = tuple(sorted(sub_sce_list or (), key=repr))
     if include_cut_type:
         payload["cut_type"] = cut_type
     return _canonicalize_nested_obj(_quantize_obj_for_signature(payload, tol=tol))
@@ -146,11 +154,15 @@ class CutRepetitionTracker:
         cut_type: str,
         row: dict,
         include_cut_type: bool = True,
+        theta_weights: Optional[dict] = None,
+        sub_sce_list: Optional[Sequence] = None,
     ) -> dict:
         signature = build_cut_signature_from_row(
             cut_type=cut_type,
             row=row,
             include_cut_type=include_cut_type,
+            theta_weights=theta_weights,
+            sub_sce_list=sub_sce_list,
         )
         return self._build_peek_record(self.seen_signatures.get(signature))
 
@@ -177,12 +189,15 @@ class CutRepetitionTracker:
         row: dict,
         sub_sce_list: Optional[List] = None,
         include_cut_type: bool = True,
+        theta_weights: Optional[dict] = None,
     ) -> dict:
         return self._record(
             signature=build_cut_signature_from_row(
                 cut_type=cut_type,
                 row=row,
                 include_cut_type=include_cut_type,
+                theta_weights=theta_weights,
+                sub_sce_list=sub_sce_list,
             ),
             cut_type=cut_type,
             ite_name=ite_name,
@@ -241,7 +256,7 @@ def detect_and_record_repetition(
 
 def _parse_rhs_to_constant_and_linear(rhs_expr):
     """
-    Parse a linear Pyomo expression (e.g. RHS from gen_sce_bds_opt_cut / gen_sce_strengthen_bds_cut)
+    Parse a linear Pyomo expression (e.g. RHS from build_multiplier_cut / gen_sce_strengthen_bds_cut)
     into a constant term and a dict of variable name -> coefficient.
     :param rhs_expr: Pyomo expression (linear)
     :return: (constant: float, var_coef: dict[str, float]). If expression is not linear, returns (None, None).
@@ -273,7 +288,7 @@ def compare_rhs(
     show_in_console: bool = False,
 ) -> Tuple[bool, float, str]:
     """
-    Compare two RHS expressions (e.g. from gen_sce_bds_opt_cut or gen_sce_strengthen_bds_cut).
+    Compare two RHS expressions (e.g. from build_multiplier_cut or gen_sce_strengthen_bds_cut).
     'Same' means: same set of variables, and for each variable and the constant term,
     the coefficients differ by at most tol.
 
@@ -347,28 +362,14 @@ def compare_rhs(
 
 
 def flatten_ordered_var_values(var_value_dict: dict, ordered_var_keys: Sequence[Tuple[str, object]]) -> Tuple[int, ...]:
-    return tuple(
-        int(var_value_dict[var_name][var_key])
+    values = tuple(
+        float(var_value_dict[var_name][var_key])
         for var_name, var_key in ordered_var_keys
     )
-
-
-def split_main_model_var_keys_for_cglp(main_model) -> Tuple[List[Tuple[str, object]], List[Tuple[str, object]]]:
-    x_var_key_list, z_var_key_list = [], []
-
-    for var_name in sorted(main_model.var.keys()):
-        if var_name == VarName.SUB_OBJ_EST:
-            continue
-
-        var_key_list = sorted(main_model.var[var_name].keys())
-        if not var_key_list:
-            continue
-
-        first_var = main_model.var[var_name][var_key_list[0]]
-        target_list = x_var_key_list if first_var.is_binary() else z_var_key_list
-        target_list.extend((var_name, var_key) for var_key in var_key_list)
-
-    return x_var_key_list, z_var_key_list
+    if any(not math.isfinite(v) or min(abs(v), abs(v - 1.0)) > 1e-6 for v in values):
+        raise ValueError('CGLP state values must be binary within solver tolerance.')
+    # Truncating 0.999999999 would silently register a different point.
+    return tuple(round(v) for v in values)
 
 
 def get_prefix_tuple(binary_point: Sequence[int], prefix_len: int) -> Tuple[int, ...]:
@@ -384,6 +385,34 @@ def flip_prefix_tail(prefix_tuple: Sequence[int]) -> Tuple[int, ...]:
 def prefix_to_w_vector(prefix_tuple: Sequence[int], total_dim: int) -> Tuple[int, ...]:
     prefix = tuple(prefix_tuple)
     return prefix + (0,) * (total_dim - len(prefix))
+
+
+def extract_affine_terms_over_vars(expr, var_id_map: Dict[int, Any]) -> Tuple[float, Dict[Any, float]]:
+    """
+    Reduce an affine Pyomo expression to ``(constant, {key: coefficient})`` over selected variables.
+
+    ``var_id_map`` maps ``id(var_object)`` to the key the caller wants back; variables outside the
+    map are ignored, so the same expression can be projected onto theta variables or onto master
+    state variables. A constant expression (int/float) is handled directly.
+
+    Used by the cut-validity harness to replay a cut offline as plain numbers.
+    """
+    if isinstance(expr, (int, float)):
+        return float(expr), {}
+
+    repn = generate_standard_repn(expr, compute_values=True)
+
+    constant_term = 0.0 if repn.constant is None else float(pyo.value(repn.constant))
+
+    coef_by_key: Dict[Any, float] = {}
+    if repn.linear_vars is not None:
+        for linear_var, linear_coef in zip(repn.linear_vars, repn.linear_coefs):
+            key = var_id_map.get(id(linear_var))
+            if key is None:
+                continue
+            coef_by_key[key] = coef_by_key.get(key, 0.0) + float(pyo.value(linear_coef))
+
+    return constant_term, coef_by_key
 
 
 def flatten_nested_var_coef_dict(var_coef_dict: dict) -> Dict[Tuple[str, object], float]:

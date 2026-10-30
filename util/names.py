@@ -18,6 +18,7 @@
 
 class ModelStatus:
     SOLVED_OPT = 'opt'                                  # model is solved and an optimal solution (including solution within required gap) is found
+    SOLVED_FEASIBLE = 'feasible'                        # a usable solution exists but optimality was not reported (seen with some open-source interfaces)
     SOLVED_TIMEOUT_WS = 'timeout_with_s'                # time out, and a feasible solution is found
     SOLVED_TIMEOUT_WOS = 'timeout_without_s'            # time out, and no feasible solution is found
     UNSOLVED = 'unsolved'                               # model is not solved yet
@@ -28,6 +29,67 @@ class ModelStatus:
 
 class InputMethodName:
     LOCAL_CSV = 'local_csv'                             # read input data from local csv file
+
+
+class SolverRoleName:
+    # Role of a model inside the decomposition; each role owns its own SolverConfig.
+    # Rule: cuts are anchored on DUAL bounds, upper bounds use incumbents. A role that feeds a cut
+    # anchor may therefore be truncated (gap / time limit) without breaking cut validity.
+    MASTER = 'master'                                   # ModelMain
+    SUBPROBLEM_LP = 'subproblem_lp'                     # relaxed ModelSub (Benders duals)
+    SUBPROBLEM_EXACT = 'subproblem_exact'               # exact ModelSub (integer-opt / CGLP anchor, incumbent)
+    INNER_MIN = 'inner_min'                             # PSInnerMinimizationProblem (Lagrangian / strengthened Benders)
+    LAGRANGIAN_MASTER = 'lagrangian_master'             # ModelLagrangianMultiplierHeuristic (QP)
+    CGLP = 'cglp'                                       # ModelCGLP (LP)
+
+    ALL_ROLES = (
+        MASTER,
+        SUBPROBLEM_LP,
+        SUBPROBLEM_EXACT,
+        INNER_MIN,
+        LAGRANGIAN_MASTER,
+        CGLP,
+    )
+
+
+class BoundModeName:
+    # How the reported master lower bound is produced when added_obj_term_weight > 0.
+    # See docs/development_record.md (P2, risk R3.3).
+    RESOLVE_AT_ZERO_WEIGHT = 'resolve_at_zero_weight'   # re-solve the master with w = 0; LB stays valid
+    HEURISTIC = 'heuristic'                             # accept an invalid bound; LB-based termination disabled
+
+
+class RunParameterName:
+    ENABLE_PRETRAINED_CUT = 'enable_pretrained_cut'
+    PRETRAINED_CUT_ADDED = 'pretrained_cut_added'
+
+
+class ResultName:
+    BEST_INCUMBENT_OBJ = 'best_incumbent_obj'
+    BEST_MAIN_SOLUTION = 'best_main_solution'
+    BEST_INCUMBENT_SOURCE = 'best_incumbent_source'
+    BEST_INCUMBENT_FILE = 'best_incumbent.json'
+
+
+class BendersAnchorName:
+    INTEGER = 'integer'
+    FRACTIONAL = 'fractional'
+
+
+class PhaseName:
+    PHASE_1 = 'phase_1'
+    PHASE_2 = 'phase_2'
+    PHASE_3 = 'phase_3'
+
+
+class BranchName:
+    PHASE_1_NEW_FRAC = 'phase_1_new_frac'
+    PHASE_1_REPEATED_FRAC = 'phase_1_repeated_frac'
+    PHASE_2_NEW_FRAC = 'phase_2_new_frac'
+    PHASE_2_REPEATED_FRAC = 'phase_2_repeated_frac'
+    PHASE_3_NEW_FRAC = 'phase_3_new_frac'
+    PHASE_3_REPEATED_FRAC_NEW_CURR = 'phase_3_repeated_frac_new_curr'
+    PHASE_3_REPEATED_FRAC_REPEATED_CURR = 'phase_3_repeated_frac_repeated_curr'
 
 
 class MainProblemHatDataMethodName:
@@ -64,11 +126,13 @@ class DataName:
     LIST_LINE = 'list_line'                             # list, [(i, j), ...], the set of all lines. AFN: L
     LIST_TIME = 'list_time'                             # list, [t1, t2, ...], the set of all time slots. AFN: T
     LIST_DG_TYPE = 'list_dg_type'                       # list, [T1, T2, ...], the set of all DG types from dg_rated_power.csv
+    LIST_REFERENCE_SCENARIO = 'list_reference_scenario'  # list, the run-level scenario universe used for DICT_SC_PROB_UNCOND
     MAIN_PROBLEM_MODEL_TYPE = 'main_problem_model_type' # str, selected main-problem model variant
 
     # === Parameters / Data ===
     NUM_DG_UB = 'dg_ub'                                 # integer, upperbound on number of generators. AFN: \overline{N^{G}} key: dg_num_lim
-    DICT_SC_PROB = 'dict_scenario_prob'                 # dict, {sc_1: float, ...}, probability of each scenario. AFN: P_s
+    DICT_SC_PROB = 'dict_scenario_prob'                 # dict, {sc_1: float, ...}, probability of each scenario, RENORMALIZED within the processed scenario subset (conditional). AFN: P_s
+    DICT_SC_PROB_UNCOND = 'dict_scenario_prob_uncond'   # dict, {sc_1: float, ...}, probability of each scenario normalized over the RUN-LEVEL scenario universe (unconditional). Used by every subproblem objective so that cut weights match the master's sum_s P_s * theta_s.
     DICT_DG_COST_FIX = 'dict_dg_cost_fix'               # dict, {j: float, ...}, fixed cost of installing DG at node j. AFN: C^{Gf}_j
     DICT_DG_COST_VAR = 'dict_dg_cost_var'               # dict, {j: float, ...}, variable cost of installing DG at node j. AFN: C^{Gv}_j
     DICT_DG_COST_UNIT = 'dict_dg_cost_unit'             # dict, {j: float, ...}, unit cost of generating power at node j. AFN: C^{Gu}_j
@@ -108,7 +172,7 @@ class DataName:
     NUM_COST_SHED = 'cost_shed'                         # float, cost of load shedding. AFN: C^{L} key: c_load_shed
     #
     # # Important values and coefficient
-    NUM_TOTAL_POWER = 'total_power'                     # num, the total power demand in the system
+    NUM_TOTAL_POWER = 'total_power'                     # legacy demand diagnostic/input; not an operating big-M
     SLACK_NODE_IDX = 'slack_node_idx'                   # num/str, the slack node's index in list of nodes
     NUM_RATED_POWER_UB = 'rated_power_ub'               # num, the potential upperbound for generator's rated power.
     DICT_DG_RATED_POWER = 'dict_dg_rated_power'         # dict, {dg_type: rated_power, ...}, from dg_rated_power.csv
@@ -168,6 +232,8 @@ DECOMPOSITION_STATE_VAR_NAMES = (
 
 class ConstrName:
     # === Main Problem Model Constraints ===
+    PRETRAINED_ABOVE = 'PrTC_above'
+    PRETRAINED_BELOW = 'PrTC_below'
     DG_UPPERBOUND = 'dg_ub'                             # AFN: Generator number upperbound
     # DG_INSTALL_TYPE_UB = 'dg_install_type_ub'           # DG_INSTALL_TYPE[j,typ] <= DG_INSTALL[j]
     DG_INSTALL_TYPE_ONE = 'dg_install_type_one'         # exactly one type per node when installed
@@ -229,6 +295,19 @@ class ConstrName:
 
     # Benders specific constraints
     VAR_LOCAL_COPY = 'v_l_c'
+
+class CutTypeName:
+    # Canonical cut-family identifiers. Do not spell these as bare string literals.
+    BENDERS = 'benders'
+    STRENGTHEN_BENDERS = 'strengthen_benders'
+    LAGRANGIAN = 'lagrangian'
+    CGLP = 'cglp'
+    INTEGER_OPT = 'integer_opt'
+
+    ALL_TYPES = (BENDERS, STRENGTHEN_BENDERS, LAGRANGIAN, CGLP, INTEGER_OPT)
+
+    AGGREGATED_SUFFIX = '_aggregated'
+
 
 class ObjName:
     DG_FIXED_COST = 'dg_fixed_cost'

@@ -106,4 +106,15 @@ Make the smallest reasonable assumption consistent with existing code.
 If ambiguity affects correctness (e.g., model semantics, indexing, cost definition), ask a targeted question and propose two options with minimal diffs.
 Always assume the correctness of the Markdown documentations in this project are unverified, unless the user clearly points out one or a few certain documentation(s) to read and/or understand.
 
+---
+
+## Report writing style (for `docs/Final Report.md` and similar report text)
+- Write in a clear, simple, and efficient style.
+- Do not use long or complex sentences.
+- Do not use advanced vocabulary unless it is necessary for accurately expressing a specific academic or technical concept.
+- Do not add decorative or purely stylistic wording.
+- Make each sentence serve a real function, such as stating a point, providing evidence, presenting a fact, or summarizing an idea. Keep the logic clear and the wording efficient, while maintaining reasonable fluency.
+- Assume the reader is a non-native English speaker who knows the relevant academic English, but has relatively limited general English ability.
+- Use the completed code only to understand the problem the algorithm solves. Do not explain the code, the implementation, or the file structure, and do not write in a README style. Write a standalone report-style description of the underlying problem instead. Use the code only to infer the problem, not as the subject of the writing.
+
 End of instructions.

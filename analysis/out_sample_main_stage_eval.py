@@ -6,10 +6,11 @@ import argparse
 import ast
 import copy
 import json
+import math
 import os
 import pickle
 import sys
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Union
 
 import pandas as pd
 
@@ -26,7 +27,7 @@ from util.headers import (
     ScenarioLineStateHeader,
     ScenarioProbHeader,
 )
-from util.names import InputMethodName, VarName
+from util.names import InputMethodName, ResultName, VarName
 
 
 def _parse_json_like_key(key: Any) -> Any:
@@ -40,7 +41,7 @@ def _parse_json_like_key(key: Any) -> Any:
 
 def normalize_main_solution(main_solution: Dict[str, Dict[Any, Any]]) -> Dict[str, Dict[Any, Any]]:
     payload = main_solution
-    for wrapper_key in ["main_result", "curr_main_result", "solution"]:
+    for wrapper_key in [ResultName.BEST_MAIN_SOLUTION, "main_result", "curr_main_result", "solution"]:
         wrapped_payload = payload.get(wrapper_key)
         if isinstance(wrapped_payload, dict):
             payload = wrapped_payload
@@ -66,6 +67,11 @@ def select_iteration_from_iter_general(
     ite_num: Optional[int] = None,
 ) -> int:
     df = pd.read_csv(iter_general_csv_path, dtype={"ite_num": str}, keep_default_na=True)
+    if selection_rule == 'best' and df['ite_num'].str.contains('_heur_', regex=False).any():
+        raise ValueError(
+            'This historical run contains generated candidates but no saved incumbent design. '
+            'Supply the best design explicitly as JSON; it cannot be recovered from master history.'
+        )
     df = df[df["ite_num"].astype(str).str.strip() != "best"].copy()
     df["ite_num_num"] = pd.to_numeric(df["ite_num"], errors="coerce")
     df = df[df["ite_num_num"].notna()].copy()
@@ -93,7 +99,15 @@ def load_main_solution_from_result_dir(
     result_dir: str,
     selection_rule: str,
     ite_num: Optional[int] = None,
-) -> tuple[Dict[str, Dict[Any, Any]], int]:
+) -> tuple[Dict[str, Dict[Any, Any]], Union[int, str]]:
+    best_path = os.path.join(result_dir, ResultName.BEST_INCUMBENT_FILE)
+    if selection_rule == 'best' and os.path.exists(best_path):
+        with open(best_path, 'r', encoding='utf-8') as file_obj:
+            payload = json.load(file_obj)
+        source = payload[ResultName.BEST_INCUMBENT_SOURCE]
+        iteration = int(source) if str(source).isdigit() else source
+        return normalize_main_solution(payload), iteration
+
     iter_general_csv_path = os.path.join(result_dir, "iter_general_info.csv")
     main_result_report_path = os.path.join(result_dir, "main_result_repetition_report.pkl")
 
@@ -115,7 +129,7 @@ def load_main_solution(
     result_dir: Optional[str] = None,
     selection_rule: str = "best",
     ite_num: Optional[int] = None,
-) -> tuple[Dict[str, Dict[Any, Any]], str, Optional[int]]:
+) -> tuple[Dict[str, Dict[Any, Any]], str, Optional[Union[int, str]]]:
     if main_solution_json_path:
         return load_main_solution_from_json(main_solution_json_path), "json", None
     if result_dir:
@@ -271,7 +285,9 @@ def evaluate_one_sample(
         main_result=main_solution,
         sub_model_sce_list=[scenario_id],
     )
-    sub_model.build_sub_model_redo()
+    # ModelSub.build_sub_model_redo was renamed to build_sub_model_canonical in workstream 4;
+    # this call site had rotted and raised AttributeError.
+    sub_model.build_sub_model_canonical()
     if solver_param_dict is None:
         sub_model.solve()
     else:
@@ -300,6 +316,7 @@ def evaluate_main_solution_out_of_sample(
     output_dir: Optional[str] = None,
     solver_param_dict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Average recourse using weights normalized over scenarios remaining after sample filtering."""
     sample_df = pd.read_csv(sample_csv_path)
     filtered_sample_df = filter_sample_dataframe(
         sample_df=sample_df,
@@ -354,6 +371,15 @@ def evaluate_main_solution_out_of_sample(
     if summary_df["probability"].isna().any():
         missing_scenarios = summary_df.loc[summary_df["probability"].isna(), "scenario_id"].tolist()
         raise ValueError(f"Missing probabilities for scenarios: {missing_scenarios}")
+    probability_sum = summary_df["probability"].sum()
+    if (
+        (summary_df["probability"] < 0).any()
+        or not math.isfinite(probability_sum)
+        or probability_sum <= 0
+    ):
+        raise ValueError("Scenario probabilities must be nonnegative with a finite positive sum.")
+    # Match the optimizer's run-level normalization, independent of sample counts per scenario.
+    summary_df["probability"] = summary_df["probability"] / probability_sum
     summary_df["weighted_objective_contribution"] = (
         summary_df["sample_objective_mean"] * summary_df["probability"]
     )

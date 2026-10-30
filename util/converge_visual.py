@@ -5,16 +5,20 @@
 
 
 import os
-import matplotlib.pyplot as plt
-import pandas as pd
-
-import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def plot_iter_obj_curves(ite_obj_value_dict, output_dir=None, real_objective_value: float = None):
-    ite_nums, incumbent_vals, bound_vals = [], [], []
+
+def plot_iter_obj_curves(ite_obj_value_dict, output_dir=None, real_objective_value: float = None,
+                         y_limits=None, show_plot=False):
+    """
+    Plot the incumbent and bound trajectories of one run.
+
+    Certified bounds and master diagnostics are separate series. Missing certificates stay missing;
+    neither guidance values nor interpolated values are presented as global lower bounds.
+    """
+    ite_nums, incumbent_vals, bound_vals, diagnostic_vals = [], [], [], []
 
     for ite_key, ite_data in ite_obj_value_dict.items():
         try:
@@ -23,25 +27,32 @@ def plot_iter_obj_curves(ite_obj_value_dict, output_dir=None, real_objective_val
             continue
 
         incumbent = ite_data.get('sub_obj(best_incumbent)', {}).get('sub_p_total', None)
-        bound = ite_data.get('main_obj(bound)', {}).get('total', None)
+        bound_data = ite_data.get('main_obj(bound)', {})
+        valid_bound = bound_data.get('valid_lower_bound', None)
 
         ite_nums.append(ite_num)
         incumbent_vals.append(incumbent)
-        bound_vals.append(bound)
+        bound_vals.append(valid_bound)
+        diagnostic_vals.append(bound_data.get('total') if valid_bound is None else None)
 
     if not ite_nums:
         print("No numeric iteration data found — plot not generated.")
         return
 
-    sorted_data = sorted(zip(ite_nums, incumbent_vals, bound_vals), key=lambda x: x[0])
-    ite_nums, incumbent_vals, bound_vals = zip(*sorted_data)
+    sorted_data = sorted(zip(ite_nums, incumbent_vals, bound_vals, diagnostic_vals), key=lambda x: x[0])
+    ite_nums, incumbent_vals, bound_vals, diagnostic_vals = zip(*sorted_data)
 
-    inc_s = pd.to_numeric(pd.Series(incumbent_vals), errors="coerce").interpolate(limit_direction="both")
-    bnd_s = pd.to_numeric(pd.Series(bound_vals), errors="coerce").interpolate(limit_direction="both")
+    inc_s = pd.to_numeric(pd.Series(incumbent_vals), errors="coerce").cummin().ffill()
+    bnd_s = pd.to_numeric(pd.Series(bound_vals), errors="coerce")
+    diagnostic_s = pd.to_numeric(pd.Series(diagnostic_vals), errors="coerce")
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(ite_nums, inc_s.tolist(), marker='.', markersize=4, label='Best Incumbent Objective')
-    ax.plot(ite_nums, bnd_s.tolist(), marker='.', markersize=4, label='Best Bound Objective')
+    if bnd_s.notna().any():
+        ax.plot(ite_nums, bnd_s.tolist(), marker='.', markersize=4, label='Valid global lower bound')
+    if diagnostic_s.notna().any():
+        ax.plot(ite_nums, diagnostic_s.tolist(), marker='.', markersize=4,
+                label='Master diagnostic (not a global lower bound)')
 
     if real_objective_value is not None:
         ax.axhline(y=real_objective_value, color='r', linestyle='--', label='Real Objective Value')
@@ -52,15 +63,23 @@ def plot_iter_obj_curves(ite_obj_value_dict, output_dir=None, real_objective_val
     ax.legend()
     ax.grid(True)
 
-    # ---- FORCE y-axis to match the sample (including the small blank below 0) ----
-    Y_TOP = 1.15e7          # top headroom like sample
-    Y_PAD_BELOW_0 = 0.05e7 # creates the blank between 0 and bottom (5% of 1e7)
-    ax.set_ylim(-Y_PAD_BELOW_0, Y_TOP)
-
-    yticks = np.arange(0.0, 1.0e7 + 1, 0.2e7)  # 0.0, 0.2, ..., 1.0 (with 1e7 scale)
-    ax.set_yticks(yticks)
-    ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))  # always show "1e7"
-    # ---------------------------------------------------------------------------
+    # ---- y-axis: scale to the data, with an optional explicit override ----
+    # A hardcoded 0 .. 1.15e7 window used to be forced here, which made the plot unreadable on any
+    # instance of a different magnitude (the micro_bench instances, for example).
+    if y_limits is not None:
+        ax.set_ylim(*y_limits)
+    else:
+        finite_values = [
+            value for value in list(inc_s) + list(bnd_s) + list(diagnostic_s)
+            + ([real_objective_value] if real_objective_value is not None else [])
+            if value is not None and np.isfinite(value)
+        ]
+        if finite_values:
+            low, high = min(finite_values), max(finite_values)
+            pad = 0.05 * (high - low) if high > low else (abs(high) * 0.05 or 1.0)
+            ax.set_ylim(min(0.0, low - pad), high + pad)
+    ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
+    # -----------------------------------------------------------------------
 
     fig.tight_layout()
 
@@ -70,7 +89,8 @@ def plot_iter_obj_curves(ite_obj_value_dict, output_dir=None, real_objective_val
         fig.savefig(save_path, dpi=200)
         print(f"Plot saved to {save_path}")
 
-    plt.show()
+    if show_plot:
+        plt.show()
     plt.close(fig)
 
 

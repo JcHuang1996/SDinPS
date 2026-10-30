@@ -258,8 +258,6 @@ def generate_lagrangian_cut_with_heuristic(
         constr_var_map=CONSTR_VAR_MAP,
     )
     lag_mult_model.build_ini_model(
-        ini_sub_obj_value=c_tx,
-        ini_main_sol=obtained_main_sol,
         ini_multiplier=curr_lag_multiplier,
         ini_stabilization_param=0.01,
     )

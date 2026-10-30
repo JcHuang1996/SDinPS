@@ -49,7 +49,7 @@ def record_solution(
     """Record solution for a dataset by running combined formulation test.
     
     Args:
-        dataset_path: Path to the dataset folder (e.g., 'unit_test/test_local_csv_file/function_test')
+        dataset_path: Path to the dataset folder (e.g., 'unit_test/test_local_csv_file/function_test_fixed_rated_p')
         scenario_list: List of scenario names to process. Passed as scenario_list_assigned 
                       to run_combined_formulation_test. Default: ['s_1', 's_2', 's_3'].
     """

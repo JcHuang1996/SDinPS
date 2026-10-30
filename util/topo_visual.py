@@ -511,7 +511,7 @@ def sto_status_preview(folder_path: str, line_state_file: str):
 
 if __name__ == '__main__':
     # Example usage: visualize IEEE123bus network topology
-    test_folder = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test'
+    test_folder = '/Users/huangjiacheng/SDinPS/unit_test/test_local_csv_file/function_test_fixed_rated_p'
     
     # Option 1: Basic network topology preview
     net_topo_preview(test_folder)

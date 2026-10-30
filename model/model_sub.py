@@ -5,16 +5,16 @@
 
 
 from model.model_combined import ModelCombined
+from model.formulation_blocks import (
+    add_operating_objective_terms,
+    make_sub_formulation_adapter,
+)
 
 from util.headers import *
 from util.names import *
 
 import pyomo.environ as pyo
-from pyomo.repn.standard_repn import generate_standard_repn
 
-import math
-import os
-import datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,98 +40,44 @@ class ModelSub(ModelCombined):
 
         self.sub_model_sce_list = sub_model_sce_list
 
+    def get_formulation_adapter(self):
+        if self._formulation_adapter is None:
+            self._formulation_adapter = make_sub_formulation_adapter(self.data)
+        return self._formulation_adapter
+
     def set_sub_objective(self):
+        """
+        Recourse objective of one scenario group, weighted by the UNCONDITIONAL probabilities.
 
-        # self.obj_term[ObjName.DG_VARIANT_COST] = pyo.quicksum(
-        #     self.data[DataName.DICT_DG_COST_VAR][j] * self.var[VarName.DG_RATED_POWER][j]
-        #     for j in self.data[DataName.LIST_NODE]
-        # )
-
-        self.obj_term[ObjName.DG_GENERATING_COST] = pyo.quicksum(
-            self.data[DataName.DICT_DG_COST_UNIT][j] * self.var[VarName.DG_ACTIVE_POWER][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
-        )
-
-        self.obj_term[ObjName.LOAD_SHED_COST] = pyo.quicksum(
-            self.data[DataName.NUM_COST_SHED] * self.var[VarName.LOAD_SHED_RATIO][j, t, s]
-            for j in self.data[DataName.LIST_NODE]
-            for t in self.data[DataName.LIST_TIME]
-            for s in self.data[DataName.LIST_SCENARIO]
+        Convention (docs/development_record.md, P3): the subproblem for group G minimizes
+        ``sum_{s in G} P_s * Q_s(x)`` so that the matching cut is written on the weighted left-hand
+        side ``sum_{s in G} P_s * theta_s`` and the master objective stays ``sum_s P_s * theta_s``.
+        The expression is built by the shared formulation block, so the recourse objective now
+        exists in exactly one place (workstream 6).
+        """
+        add_operating_objective_terms(
+            self,
+            adapter=self.get_formulation_adapter(),
+            dg_obj_name=ObjName.DG_GENERATING_COST,
+            load_shed_obj_name=ObjName.LOAD_SHED_COST,
         )
 
         self.set_objective(
-            # self.obj_term[ObjName.DG_VARIANT_COST]
-            + self.obj_term[ObjName.DG_GENERATING_COST]
+            self.obj_term[ObjName.DG_GENERATING_COST]
             + self.obj_term[ObjName.LOAD_SHED_COST],
             sense=pyo.minimize
         )
 
-    def solve_relaxed(self):
-        logger.info(f'Optimizing relaxed model of {self.model_name}')
-
-        self.model_relax = self.model.clone()
-        pyo.TransformationFactory('core.relax_integer_vars').apply_to(self.model_relax)
-
-        self.model_relax.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
-
-        self._last_results_relax = self._solve_model(
-            self.model_relax,
-            use_config_defaults=True,
-            load_solutions=True
-        )
-
-    def benders_opt_cut_info_generator(self):
-        """
-        After solving the RELAXED sub model, derive the coefficients and constants for generating
-        the corresponding Benders optimality cut.
-        """
-
-        constant_term = 0.0
-
-        var_coeff_dict = {
-            var_class_name: {var_key: 0.0 for var_key in sorted(self.main_result[var_class_name].keys())}
-            for var_class_name in sorted(self.main_result.keys())
-            if var_class_name in self.var
+    def get_scenario_probability_weights(self):
+        """Return {s: P_s} (unconditional) for the scenarios carried by this subproblem."""
+        return {
+            s: self.data[DataName.DICT_SC_PROB_UNCOND][s]
+            for s in self.data[DataName.LIST_SCENARIO]
         }
 
-        relax_id_to_key = {}
-        for var_class_name in sorted(var_coeff_dict.keys()):
-            for var_key in sorted(var_coeff_dict[var_class_name].keys()):
-                v = self.var[var_class_name][var_key]
-                comp_name = self._var_comp_name_by_id[id(v)]
-                v_relax = getattr(self.model_relax, comp_name)
-                relax_id_to_key[id(v_relax)] = (var_class_name, var_key)
-
-        for c in self.model_relax._constr_list.values():
-
-            pi = self.model_relax.dual.get(c, 0.0)
-
-            if c.upper is not None and c.lower is None:
-                residual = c.body - c.upper
-            elif c.lower is not None and c.upper is None:
-                residual = c.body - c.lower
-            else:
-                rhs = c.upper if c.upper is not None else c.lower
-                residual = c.body - rhs
-
-            repn = generate_standard_repn(residual, compute_values=False)
-
-            c0 = repn.constant if repn.constant is not None else 0.0
-            constant_term += float(pi) * (-pyo.value(c0))
-
-            if repn.linear_vars is None:
-                continue
-
-            for v_i, a_i in zip(repn.linear_vars, repn.linear_coefs):
-                key = relax_id_to_key.get(id(v_i), None)
-                if key is None:
-                    continue
-                var_class_name, var_key = key
-                var_coeff_dict[var_class_name][var_key] += float(pi) * float(a_i)
-
-        return constant_term, var_coeff_dict
+    def _prepare_relaxed_model(self, relaxed_model):
+        """Attach the dual Suffix so local-copy multipliers can be read after the LP solve."""
+        relaxed_model.dual = pyo.Suffix(direction=pyo.Suffix.IMPORT)
 
     def get_decomposition_state_var_name_list(self):
         """Return the canonical master-state blocks copied into every subproblem."""
@@ -209,11 +155,24 @@ class ModelSub(ModelCombined):
         constr_dual_value: dict. key: constraint name; value: dual optimal solution value
         constr_var_map: dict. key: constraint name; value: (var class, var key)
         """
-        constr_var_map = {}
+        constr_dual_value, constr_var_map = {}, {}
         for constr_name in constr_to_collect_list:
+            var_info = self.local_copy_constr_info.get(constr_name)
+            if var_info is None:
+                raise KeyError(
+                    f'Constraint {constr_name} is not a registered local-copy row in {self.model_name}.'
+                )
             constr_item = self.get_constr_item_in_relax_by_name(constr_name)
+            if constr_item not in self.model_relax.dual:
+                raise KeyError(
+                    f'No dual value available for local-copy constraint {constr_name} in '
+                    f'{self.model_name}; the relaxation must be solved with the dual Suffix attached.'
+                )
             pi = self.model_relax.dual[constr_item]
-            self.constr_dual_value[constr_name] = pi
-            constr_var_map[constr_name] = self.local_copy_constr_info[constr_name]
+            constr_dual_value[constr_name] = pi
+            constr_var_map[constr_name] = var_info
 
-        return self.constr_dual_value.copy(), constr_var_map
+        # Return only the rows that were asked for; self.constr_dual_value stays as the running
+        # record for reporting.
+        self.constr_dual_value.update(constr_dual_value)
+        return constr_dual_value, constr_var_map

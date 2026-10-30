@@ -2,8 +2,6 @@
 # @Time     : 2025/09/05
 # @Author   : J. Huang
 # @Email    : jiachenghuang0601@gmail.com
-from numpy.ma.core import arccos
-
 from util.headers import *
 from util.names import *
 from util.project_logger import init_logger
@@ -32,10 +30,45 @@ class DataProcessor:
         # method used to collapse t,s-dependent data for the enriched main problem
         self.main_problem_hat_data_method = MainProblemHatDataMethodName.WEIGHTED_AVERAGE
 
+        # the run-level scenario universe. DICT_SC_PROB is renormalized within whatever subset is
+        # being processed (conditional), which makes it unusable as a subproblem weight; the
+        # unconditional distribution DICT_SC_PROB_UNCOND is normalized over this list instead, so
+        # master and every subproblem agree on P_s. None means 'use the processed subset', which
+        # reproduces the previous behaviour.
+        self.reference_scenario_list = None
+        self._total_power_cache = {}
+
     def clear_existing_data(self):
 
         # clear the processed data to generate a new data set
         self.data = {}
+
+    @staticmethod
+    def _build_unconditional_scenario_prob(prob_by_scenario_full, reference_scenario_list, selected_scenario_list):
+        """
+        Build {s: P_s} for the selected scenarios, normalized over the run-level scenario universe.
+
+        Every selected scenario must belong to that universe; otherwise the subproblem weight would
+        not correspond to any master term.
+        """
+        missing_reference = [s for s in reference_scenario_list if s not in prob_by_scenario_full]
+        if missing_reference:
+            raise ValueError(f'Missing scenario probability for reference scenarios: {missing_reference}')
+
+        outside_reference = [s for s in selected_scenario_list if s not in reference_scenario_list]
+        if outside_reference:
+            raise ValueError(
+                f'Selected scenarios are outside the reference scenario universe: {outside_reference}'
+            )
+
+        reference_sum = sum(prob_by_scenario_full[s] for s in reference_scenario_list)
+        if reference_sum <= 0:
+            raise ValueError('Reference scenario probabilities must have a positive sum.')
+
+        return {
+            s: prob_by_scenario_full[s] / reference_sum
+            for s in selected_scenario_list
+        }
 
     def static_data_process(self):
         """
@@ -288,10 +321,27 @@ class DataProcessor:
         # Probabilities are normalized over the selected scenario subset.
         # A single-scenario subproblem is therefore treated as conditional on that scenario,
         # while a main model processed with the full scenario list keeps the full distribution.
+        # Kept for reporting and for the collapsed main-problem 'hat' data.
         self.data[DataName.DICT_SC_PROB] = {
             s: prob_by_scenario[s] / prob_sum
             for s in self.data[DataName.LIST_SCENARIO]
         }
+
+        # The UNCONDITIONAL distribution: normalized over the run-level scenario universe rather
+        # than over the processed subset, so a subproblem for group G gets the same P_s the master
+        # uses in sum_s P_s * theta_s. This is what makes a group cut valid for ANY grouping.
+        self.data[DataName.LIST_REFERENCE_SCENARIO] = list(
+            self.reference_scenario_list
+            if self.reference_scenario_list is not None
+            else self.data[DataName.LIST_SCENARIO]
+        )
+        self.data[DataName.DICT_SC_PROB_UNCOND] = self._build_unconditional_scenario_prob(
+            prob_by_scenario_full=self.raw_data[InputDataName.SCENARIO_PROB_DF].set_index(
+                [ScenarioProbHeader.SCENARIO_ID]
+            )[ScenarioProbHeader.SCENARIO_PROB].to_dict(),
+            reference_scenario_list=self.data[DataName.LIST_REFERENCE_SCENARIO],
+            selected_scenario_list=self.data[DataName.LIST_SCENARIO],
+        )
 
         # ========================================
         # process data from s_line_state_w_o_harden.csv:
@@ -372,7 +422,7 @@ class DataProcessor:
         """
 
         # ====================
-        # compute NUM_TOTAL_POWER, the big-M for Voltage - flow relationships constraints
+        # Retain NUM_TOTAL_POWER as a legacy diagnostic/input (not an operating big-M).
         # value: the sum of all p-load of the system
         # ====================
 
@@ -380,7 +430,16 @@ class DataProcessor:
         if ParameterKey.TOTAL_POWER in dict_parameter:
             self.data[DataName.NUM_TOTAL_POWER] = dict_parameter[ParameterKey.TOTAL_POWER]
         else:
-            self.data[DataName.NUM_TOTAL_POWER] = self._calculate_total_power_from_selected_demand()
+            reference_scenarios = tuple(
+                self.reference_scenario_list
+                if self.reference_scenario_list is not None
+                else self.data[DataName.LIST_SCENARIO]
+            )
+            if reference_scenarios not in self._total_power_cache:
+                self._total_power_cache[reference_scenarios] = self._calculate_total_power_from_raw_demand(
+                    reference_scenarios
+                )
+            self.data[DataName.NUM_TOTAL_POWER] = self._total_power_cache[reference_scenarios]
 
         # # ====================
         # # compute NUM_RATED_POWER_UB, the big-M for DG operation constraints
@@ -388,24 +447,22 @@ class DataProcessor:
         # # ====================
         # self.data[DataName.NUM_RATED_POWER_UB] = 1.75
 
-    def _calculate_total_power_from_selected_demand(self):
-        """
-        Calculate the active-power big-M from the processed scenario/time subset.
-        """
-        if DataName.DICT_DEMAND_ACTIVE not in self.data:
-            df_node = self.raw_data[InputDataName.NODE_DF].copy()
-            return df_node[NodeHeader.P_LOAD].sum()
-
-        max_total_power = 0
-        for t in self.data[DataName.LIST_TIME]:
-            for s in self.data[DataName.LIST_SCENARIO]:
-                total_power = sum(
-                    self.data[DataName.DICT_DEMAND_ACTIVE][j, t, s]
-                    for j in self.data[DataName.LIST_NODE]
-                )
-                max_total_power = max(max_total_power, total_power)
-
-        return max_total_power
+    def _calculate_total_power_from_raw_demand(self, scenario_list):
+        """Compute one run-level big-M over the complete reference scenario universe."""
+        df_s_load = self.raw_data[InputDataName.SCENARIO_NODE_LOAD_DF]
+        selected = df_s_load[
+            df_s_load[ScenarioNodePowerHeader.SCENARIO_ID].isin(scenario_list)
+        ]
+        missing = sorted(
+            set(scenario_list)
+            - set(selected[ScenarioNodePowerHeader.SCENARIO_ID].unique())
+        )
+        if missing:
+            raise ValueError(f'Missing active-power demand for reference scenarios: {missing}')
+        totals = selected.groupby(ScenarioNodePowerHeader.SCENARIO_ID)[
+            ScenarioNodePowerHeader.P_LOAD_MW
+        ].sum()
+        return float(totals.max())
 
     def generate_main_problem_hat_data(self):
         """

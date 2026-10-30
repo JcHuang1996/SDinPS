@@ -4,17 +4,24 @@
 # @Email    : jiachenghuang0601@gmail.com
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence, Tuple
+from enum import Enum
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 __all__ = [
     'MainSolution',
     'SubProblemResult',
     'DualInfo',
-    'CutCandidate',
+    'CutRequest',
+    'CutOutcome',
+    'AggregationPolicy',
     'GeneratedCut',
+    'InnerMinimizationResult',
     'ScenarioGroup',
     'IterationContext',
+    'SolutionGenerator',
+    'NoOpSolutionGenerator',
+    'StaticSolutionGenerator',
 ]
 
 
@@ -65,16 +72,29 @@ class DualInfo:
         return self.var_map
 
 
+class CutOutcome(str, Enum):
+    ADDED = 'added'
+    REPEATED = 'repeated'
+    NOT_APPLICABLE = 'not_applicable'
+    NOT_VIOLATED = 'not_violated'
+
+
+class AggregationPolicy(str, Enum):
+    PER_GROUP = 'per_group'
+    AGGREGATE = 'aggregate'
+
+
 @dataclass(frozen=True)
-class CutCandidate:
-    cut_type: str
+class CutRequest:
+    """Uniform input contract for every registered cut generator."""
     scenario_group: ScenarioGroup
     ite_name: str
-    main_solution: MainSolution
+    anchor_solution: MainSolution
     dual_info: Optional[DualInfo] = None
-    sub_obj_value: Optional[float] = None
-    exact_sub_obj_value: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    relaxed_obj: Optional[float] = None
+    exact_obj_bound: Optional[float] = None
+    theta_values: Optional[Dict[Any, float]] = None
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -91,6 +111,27 @@ class GeneratedCut:
 
 
 @dataclass(frozen=True)
+class InnerMinimizationResult:
+    r"""
+    Outcome of one Lagrangian inner minimization ``min_{x,y in X_sub} c^T x - lambda^T (y - y*)``.
+
+    The two objective quantities point in OPPOSITE directions and are never interchangeable:
+
+    * ``lagrangian_lower_bound`` -- the solver's dual bound, ``L_lb <= L(lambda)``. The only value a
+      cut may be anchored on; a MIP gap or time limit then weakens the cut instead of invalidating it.
+    * ``incumbent_sub_obj`` / ``incumbent_main_sol`` -- the returned feasible point, whose objective
+      is an UPPER bound on ``L(lambda)``. Valid input for the multiplier heuristic's outer
+      approximation, invalid as a cut anchor.
+    """
+    scenario_group: ScenarioGroup
+    multiplier: Dict[str, float]
+    lagrangian_lower_bound: float
+    incumbent_sub_obj: float
+    incumbent_main_sol: Dict[str, Dict[Any, Any]]
+    solve_status: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class IterationContext:
     ite_name: str
     iteration_number: Optional[int] = None
@@ -103,13 +144,42 @@ class IterationContext:
         object.__setattr__(self, 'candidate_cut_types', tuple(self.candidate_cut_types))
 
 
+class SolutionGenerator:
+    """Hook for producing extra first-stage points used as cut anchors."""
+
+    def generate(self, context: IterationContext) -> List[MainSolution]:
+        raise NotImplementedError
+
+
+class NoOpSolutionGenerator(SolutionGenerator):
+    """Default generator; preserves the original decomposition trajectory."""
+
+    def generate(self, context: IterationContext) -> List[MainSolution]:
+        return []
+
+
+class StaticSolutionGenerator(SolutionGenerator):
+    """Return a fixed collection of anchors, with runner-side repetition filtering."""
+
+    def __init__(self, solutions: Sequence[MainSolution]):
+        self._solutions = tuple(solutions)
+
+    def generate(self, context: IterationContext) -> List[MainSolution]:
+        return list(self._solutions)
+
+
 @dataclass(frozen=True)
 class SubProblemResult:
     scenario_group: ScenarioGroup
     main_solution: MainSolution
     relaxed_obj_value: float
     benders_dual: DualInfo
+    #: Incumbent objective of the exact subproblem -- an UPPER bound on Q_G(x). Incumbent accounting
+    #: only; never anchor a cut on it.
     exact_obj_value: Optional[float] = None
+    #: Dual bound of the exact subproblem -- a LOWER bound on Q_G(x), valid under any MIP gap or
+    #: time limit. This is the value every cut anchor must use.
+    exact_obj_bound: Optional[float] = None
     fractional_solution: Optional[MainSolution] = None
     fractional_relaxed_obj_value: Optional[float] = None
     fractional_dual: Optional[DualInfo] = None
@@ -125,17 +195,3 @@ class SubProblemResult:
     def local_copy_var_map(self) -> Dict[str, Tuple[str, Any]]:
         """Expose the local-copy constraint to master-state variable mapping."""
         return self.benders_dual.var_map
-
-    def as_legacy_tuple(self):
-        return (
-            self.relaxed_obj_value,
-            self.benders_dual.dual_values,
-            self.benders_dual.var_map,
-            self.fractional_dual.dual_values if self.fractional_dual is not None else None,
-            self.fractional_dual.var_map if self.fractional_dual is not None else None,
-            self.exact_obj_value,
-            self.fractional_relaxed_obj_value,
-        )
-
-    def __iter__(self):
-        return iter(self.as_legacy_tuple())
